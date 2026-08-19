@@ -1,0 +1,7 @@
+.orchestrator/
+node_modules/
+dist/
+*.log
+*.swp
+*.tgz
+.DS_Store

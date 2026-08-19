@@ -1,0 +1,20 @@
+{
+  "baseBranch": "main",
+  "remote": "origin",
+  "readyLabel": "agent-ready",
+  "claimedLabel": "agent-in-progress",
+  "completedLabel": "agent-completed",
+  "branchPrefix": "agents/issue-",
+  "testCommand": "npm test",
+  "maxReviewCycles": 3,
+  "pollIntervalSeconds": 30,
+  "commandTimeoutMinutes": 45,
+  "claude": {
+    "model": null,
+    "allowedTools": "Read,Write,Edit,Bash"
+  },
+  "codex": {
+    "model": null,
+    "reasoningEffort": "high"
+  }
+}
