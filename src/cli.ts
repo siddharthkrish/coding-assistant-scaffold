@@ -29,11 +29,11 @@ try {
       console.log(result.installed
         ? `Installed ${packageManifest.name}@${packageManifest.version} and added package scripts.`
         : "Added repository scripts; package installation was skipped.");
-      console.log("Run the `agents:once` script for one issue or `agents` for the queue.");
+      console.log("Run the `agents:doctor` script, then use `agents:once` for one issue or `agents` for the queue.");
     } else {
       console.log(`Run \`npx ${packageManifest.name}@${packageManifest.version} doctor\`, then use \`run\` or \`start\`.`);
     }
-    console.log("Use `agent-orchestrator eject-prompts` to customize agent instructions.");
+    console.log(`Use \`npx ${packageManifest.name}@${packageManifest.version} eject-prompts\` to customize agent instructions.`);
   } else {
     const config = loadConfig(configFlag);
     if (command === "doctor") {

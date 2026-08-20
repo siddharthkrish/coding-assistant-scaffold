@@ -26,6 +26,7 @@ test("init scaffolds repo-local config, ignore rules, and package scripts", asyn
   const manifest = JSON.parse(readFileSync(join(dir, "package.json"), "utf8"));
   assert.equal(manifest.scripts.agents, "agent-orchestrator start");
   assert.equal(manifest.scripts["agents:once"], "agent-orchestrator run");
+  assert.equal(manifest.scripts["agents:doctor"], "agent-orchestrator doctor");
   assert.match(readFileSync(join(dir, ".gitignore"), "utf8"), /\.agent-orchestrator\/\*\.sqlite\*/);
 });
 
