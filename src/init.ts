@@ -78,6 +78,7 @@ function addPackageScripts(root: string): void {
     ...manifest.scripts,
     agents: "agent-orchestrator start",
     "agents:once": "agent-orchestrator run",
+    "agents:doctor": "agent-orchestrator doctor",
     "agents:status": "agent-orchestrator status"
   };
   writeFileSync(path, `${JSON.stringify(manifest, null, 2)}\n`);

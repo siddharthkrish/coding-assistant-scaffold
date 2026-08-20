@@ -9,7 +9,7 @@ Merge authority remains in deterministic code rather than either agent.
 Run the initializer inside the repository the agents should work on:
 
 ```sh
-npx pair-programming-orchestrator@0.1.0 init
+npx pair-programming-orchestrator@0.1.1 init
 ```
 
 For Node projects, `init` installs an exact development dependency and adds these scripts:
@@ -17,23 +17,24 @@ For Node projects, `init` installs an exact development dependency and adds thes
 ```sh
 npm run agents:once    # Process one issue
 npm run agents         # Continuously watch the issue queue
+npm run agents:doctor  # Validate tools and authentication
 npm run agents:status  # Inspect durable workflow state
 ```
 
 Before the first run, validate the local tools and authentication:
 
 ```sh
-npm exec -- agent-orchestrator doctor
+npm run agents:doctor
 ```
 
 Label an issue `agent-ready`, then run one issue or select it explicitly:
 
 ```sh
 npm run agents:once
-npm exec -- agent-orchestrator run --issue 123
+npm run agents:once -- --issue 123
 ```
 
-Use `--no-install` with `init` to scaffold without adding a package dependency. Non-Node repositories can keep using the version-pinned `npx pair-programming-orchestrator@0.1.0 <command>` form.
+Use `--no-install` with `init` to scaffold without adding a package dependency. Non-Node repositories can keep using the version-pinned `npx pair-programming-orchestrator@0.1.1 <command>` form. Avoid `npm exec -- agent-orchestrator`: without the local development dependency, npm resolves that as the unrelated `agent-orchestrator` package from the registry.
 
 ## What `init` creates
 
