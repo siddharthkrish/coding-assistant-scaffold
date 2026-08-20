@@ -14,10 +14,11 @@ test("init scaffolds repo-local config, ignore rules, and package scripts", asyn
     scripts: { test: "node --test" }
   }));
 
-  const result = await initializeProject({ directory: dir, install: false });
+  const result = await initializeProject({ directory: dir, install: false, labels: false });
   assert.equal(result.project.root, realpathSync(dir));
   assert.equal(result.project.testCommand, "npm test");
   assert.equal(result.installed, false);
+  assert.equal(result.labelsCreated, null);
 
   const config = JSON.parse(readFileSync(join(dir, ".agent-orchestrator", "config.json"), "utf8"));
   assert.equal(config.baseBranch, "main");
