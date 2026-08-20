@@ -20,7 +20,7 @@ export async function discoverProject(start = process.cwd()): Promise<ProjectInf
     name: basename(root),
     baseBranch: await detectBaseBranch(root),
     packageManager,
-    testCommand: detectTestCommand(root, packageManager),
+    testCommand: detectTestCommand(root) ?? "auto",
     hasPackageJson: existsSync(resolve(root, "package.json"))
   };
 }
@@ -50,7 +50,8 @@ function detectPackageManager(root: string): ProjectInfo["packageManager"] {
   return null;
 }
 
-function detectTestCommand(root: string, packageManager: ProjectInfo["packageManager"]): string {
+export function detectTestCommand(root: string): string | null {
+  const packageManager = detectPackageManager(root);
   const packagePath = resolve(root, "package.json");
   if (existsSync(packagePath)) {
     const manifest = JSON.parse(readFileSync(packagePath, "utf8"));
@@ -66,5 +67,5 @@ function detectTestCommand(root: string, packageManager: ProjectInfo["packageMan
   }
   if (existsSync(resolve(root, "Cargo.toml"))) return "cargo test";
   if (existsSync(resolve(root, "go.mod"))) return "go test ./...";
-  return "echo 'Configure testCommand in .agent-orchestrator/config.json' && exit 1";
+  return null;
 }

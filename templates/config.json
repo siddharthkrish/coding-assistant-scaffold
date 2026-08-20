@@ -5,7 +5,7 @@
   "claimedLabel": "agent-in-progress",
   "completedLabel": "agent-completed",
   "branchPrefix": "agents/issue-",
-  "testCommand": "npm test",
+  "testCommand": "auto",
   "maxReviewCycles": 3,
   "pollIntervalSeconds": 30,
   "commandTimeoutMinutes": 45,

@@ -1,6 +1,7 @@
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { runCommand } from "./process.ts";
+import { detectTestCommand } from "./project.ts";
 import type { Config, Issue, Run } from "./types.ts";
 
 const quiet = { quiet: true } as const;
@@ -33,7 +34,16 @@ export async function prepareWorktree(config: Config, run: Run): Promise<void> {
 }
 
 export async function runTests(config: Config, run: Run): Promise<void> {
-  await runCommand("sh", ["-lc", config.testCommand], {
+  const testCommand = config.testCommand === "auto"
+    ? detectTestCommand(run.worktree)
+    : config.testCommand;
+  if (!testCommand) {
+    throw new Error(
+      "Unable to detect a test command after implementation. Set testCommand in .agent-orchestrator/config.json."
+    );
+  }
+  console.log(`Running tests: ${testCommand}`);
+  await runCommand("sh", ["-lc", testCommand], {
     cwd: run.worktree,
     timeoutMs: config.commandTimeoutMinutes * 60_000
   });

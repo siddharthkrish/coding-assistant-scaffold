@@ -22,7 +22,8 @@ try {
       directory: valueOf("--dir"),
       force: hasFlag("--force"),
       install: !hasFlag("--no-install"),
-      labels: !hasFlag("--no-labels")
+      labels: !hasFlag("--no-labels"),
+      createPackageJson: hasFlag("--create-package-json")
     });
     console.log(`Initialized agent orchestration in ${result.project.root}`);
     console.log(`Configuration: ${result.configPath}`);
@@ -33,6 +34,7 @@ try {
     } else {
       console.log("GitHub label provisioning was skipped.");
     }
+    if (result.packageJsonCreated) console.log("Created a private tooling package.json.");
     if (result.project.hasPackageJson) {
       console.log(result.installed
         ? `Installed ${packageManifest.name}@${packageManifest.version} and added package scripts.`
@@ -138,7 +140,7 @@ function usage(): void {
   console.log(`agent-orchestrator ${packageManifest.version}
 
 Usage:
-  agent-orchestrator init [--dir path] [--no-install] [--no-labels] [--force]
+  agent-orchestrator init [--dir path] [--create-package-json] [--no-install] [--no-labels] [--force]
   agent-orchestrator doctor [--config path]
   agent-orchestrator run [--issue N] [--config path]
   agent-orchestrator start [--config path]
