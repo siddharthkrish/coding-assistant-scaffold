@@ -21,10 +21,18 @@ try {
     const result = await initializeProject({
       directory: valueOf("--dir"),
       force: hasFlag("--force"),
-      install: !hasFlag("--no-install")
+      install: !hasFlag("--no-install"),
+      labels: !hasFlag("--no-labels")
     });
     console.log(`Initialized agent orchestration in ${result.project.root}`);
     console.log(`Configuration: ${result.configPath}`);
+    if (result.labelsCreated) {
+      console.log(result.labelsCreated.length
+        ? `Created GitHub labels: ${result.labelsCreated.join(", ")}.`
+        : "GitHub lifecycle labels already exist.");
+    } else {
+      console.log("GitHub label provisioning was skipped.");
+    }
     if (result.project.hasPackageJson) {
       console.log(result.installed
         ? `Installed ${packageManifest.name}@${packageManifest.version} and added package scripts.`
@@ -130,7 +138,7 @@ function usage(): void {
   console.log(`agent-orchestrator ${packageManifest.version}
 
 Usage:
-  agent-orchestrator init [--dir path] [--no-install] [--force]
+  agent-orchestrator init [--dir path] [--no-install] [--no-labels] [--force]
   agent-orchestrator doctor [--config path]
   agent-orchestrator run [--issue N] [--config path]
   agent-orchestrator start [--config path]

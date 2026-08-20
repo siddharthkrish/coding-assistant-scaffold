@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { configDirectory, configFileName } from "./config.ts";
+import { ensureGitHubLabels } from "./labels.ts";
 import { runCommand } from "./process.ts";
 import { discoverProject, type ProjectInfo } from "./project.ts";
 
@@ -13,12 +14,14 @@ export type InitOptions = {
   directory?: string;
   force?: boolean;
   install?: boolean;
+  labels?: boolean;
 };
 
 export type InitResult = {
   project: ProjectInfo;
   configPath: string;
   installed: boolean;
+  labelsCreated: string[] | null;
 };
 
 export async function initializeProject(options: InitOptions = {}): Promise<InitResult> {
@@ -29,9 +32,12 @@ export async function initializeProject(options: InitOptions = {}): Promise<Init
     throw new Error(`${configPath} already exists; use --force to replace it`);
   }
 
-  mkdirSync(settingsDirectory, { recursive: true });
   const template = JSON.parse(readFileSync(resolve(packageRoot, "templates", "config.json"), "utf8"));
   const config = { ...template, baseBranch: project.baseBranch, testCommand: project.testCommand };
+  const labelsCreated = options.labels === false
+    ? null
+    : await ensureGitHubLabels(project.root, config);
+  mkdirSync(settingsDirectory, { recursive: true });
   writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`);
   updateGitignore(project.root);
   let installed = false;
@@ -39,7 +45,7 @@ export async function initializeProject(options: InitOptions = {}): Promise<Init
     addPackageScripts(project.root);
     if (options.install !== false) installed = await installPackage(project);
   }
-  return { project, configPath, installed };
+  return { project, configPath, installed, labelsCreated };
 }
 
 export function ejectPrompts(repository: string, force = false): string[] {

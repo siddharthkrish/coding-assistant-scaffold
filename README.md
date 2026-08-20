@@ -9,7 +9,7 @@ Merge authority remains in deterministic code rather than either agent.
 Run the initializer inside the repository the agents should work on:
 
 ```sh
-npx pair-programming-orchestrator@0.1.1 init
+npx pair-programming-orchestrator@0.1.2 init
 ```
 
 For Node projects, `init` installs an exact development dependency and adds these scripts:
@@ -34,7 +34,9 @@ npm run agents:once
 npm run agents:once -- --issue 123
 ```
 
-Use `--no-install` with `init` to scaffold without adding a package dependency. Non-Node repositories can keep using the version-pinned `npx pair-programming-orchestrator@0.1.1 <command>` form. Avoid `npm exec -- agent-orchestrator`: without the local development dependency, npm resolves that as the unrelated `agent-orchestrator` package from the registry.
+During initialization, the orchestrator creates any missing `agent-ready`, `agent-in-progress`, and `agent-completed` labels in the GitHub repository while preserving existing labels. Use `--no-labels` only when intentionally scaffolding without GitHub access.
+
+Use `--no-install` with `init` to scaffold without adding a package dependency. Non-Node repositories can keep using the version-pinned `npx pair-programming-orchestrator@0.1.2 <command>` form. Avoid `npm exec -- agent-orchestrator`: without the local development dependency, npm resolves that as the unrelated `agent-orchestrator` package from the registry.
 
 ## What `init` creates
 
@@ -57,7 +59,7 @@ The CLI discovers `.agent-orchestrator/config.json` by walking upward from the c
 ## Commands
 
 ```text
-agent-orchestrator init [--dir path] [--no-install] [--force]
+agent-orchestrator init [--dir path] [--no-install] [--no-labels] [--force]
 agent-orchestrator doctor [--config path]
 agent-orchestrator run [--issue N] [--config path]
 agent-orchestrator start [--config path]
