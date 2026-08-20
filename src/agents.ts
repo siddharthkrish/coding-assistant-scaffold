@@ -94,7 +94,7 @@ function validateReview(review: Review): void {
 export function implementationPrompt(config: Config, run: Run): string {
   return renderPrompt(config, "implement", {
     issueNumber: String(run.issueNumber), issueTitle: run.issueTitle,
-    issueBody: run.issueBody, testCommand: config.testCommand
+    issueBody: run.issueBody, testCommand: promptTestCommand(config)
   }, `Implement GitHub issue #{{issueNumber}}: {{issueTitle}}
 
 {{issueBody}}
@@ -105,7 +105,7 @@ Work only in the current repository. Inspect the codebase before editing. Implem
 export function fixPrompt(config: Config, run: Run, review: Review): string {
   return renderPrompt(config, "fix", {
     issueNumber: String(run.issueNumber), review: JSON.stringify(review, null, 2),
-    testCommand: config.testCommand
+    testCommand: promptTestCommand(config)
   }, `Address every actionable Codex review finding below for issue #{{issueNumber}}.
 
 {{review}}
@@ -115,10 +115,16 @@ Inspect the current files rather than trusting line numbers blindly. Make the sm
 
 export function ciFixPrompt(config: Config, run: Run, checks: string): string {
   return renderPrompt(config, "ci-fix", {
-    issueNumber: String(run.issueNumber), checks, testCommand: config.testCommand
+    issueNumber: String(run.issueNumber), checks, testCommand: promptTestCommand(config)
   }, `The CI checks for issue #{{issueNumber}} failed. Diagnose and fix the failures using this check summary:
 
 {{checks}}
 
 Inspect the repository and reproduce failures locally where possible. Make the smallest correct fixes and run {{testCommand}}. Do not commit, push, merge, or alter GitHub metadata.`);
+}
+
+function promptTestCommand(config: Config): string {
+  return config.testCommand === "auto"
+    ? "the appropriate test suite for the project"
+    : config.testCommand;
 }

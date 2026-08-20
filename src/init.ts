@@ -15,6 +15,7 @@ export type InitOptions = {
   force?: boolean;
   install?: boolean;
   labels?: boolean;
+  createPackageJson?: boolean;
 };
 
 export type InitResult = {
@@ -22,10 +23,11 @@ export type InitResult = {
   configPath: string;
   installed: boolean;
   labelsCreated: string[] | null;
+  packageJsonCreated: boolean;
 };
 
 export async function initializeProject(options: InitOptions = {}): Promise<InitResult> {
-  const project = await discoverProject(options.directory ?? process.cwd());
+  let project = await discoverProject(options.directory ?? process.cwd());
   const settingsDirectory = resolve(project.root, configDirectory);
   const configPath = resolve(settingsDirectory, configFileName);
   if (existsSync(configPath) && !options.force) {
@@ -33,10 +35,15 @@ export async function initializeProject(options: InitOptions = {}): Promise<Init
   }
 
   const template = JSON.parse(readFileSync(resolve(packageRoot, "templates", "config.json"), "utf8"));
-  const config = { ...template, baseBranch: project.baseBranch, testCommand: project.testCommand };
   const labelsCreated = options.labels === false
     ? null
-    : await ensureGitHubLabels(project.root, config);
+    : await ensureGitHubLabels(project.root, template);
+  const packageJsonCreated = !project.hasPackageJson && options.createPackageJson === true;
+  if (packageJsonCreated) {
+    createToolingPackageJson(project.root, project.name);
+    project = await discoverProject(project.root);
+  }
+  const config = { ...template, baseBranch: project.baseBranch, testCommand: project.testCommand };
   mkdirSync(settingsDirectory, { recursive: true });
   writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`);
   updateGitignore(project.root);
@@ -45,7 +52,7 @@ export async function initializeProject(options: InitOptions = {}): Promise<Init
     addPackageScripts(project.root);
     if (options.install !== false) installed = await installPackage(project);
   }
-  return { project, configPath, installed, labelsCreated };
+  return { project, configPath, installed, labelsCreated, packageJsonCreated };
 }
 
 export function ejectPrompts(repository: string, force = false): string[] {
@@ -88,6 +95,18 @@ function addPackageScripts(root: string): void {
     "agents:status": "agent-orchestrator status"
   };
   writeFileSync(path, `${JSON.stringify(manifest, null, 2)}\n`);
+}
+
+function createToolingPackageJson(root: string, repositoryName: string): void {
+  const normalized = repositoryName
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, "-")
+    .replace(/^[._-]+|[._-]+$/g, "");
+  const manifest = {
+    name: `${normalized || "repository"}-tooling`,
+    private: true
+  };
+  writeFileSync(resolve(root, "package.json"), `${JSON.stringify(manifest, null, 2)}\n`);
 }
 
 async function installPackage(project: ProjectInfo): Promise<boolean> {
