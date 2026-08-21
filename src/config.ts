@@ -18,7 +18,13 @@ const defaults = {
   pollIntervalSeconds: 30,
   commandTimeoutMinutes: 45,
   claude: { model: null, allowedTools: "Read,Write,Edit,Bash" },
-  codex: { model: null, reasoningEffort: "high" }
+  codex: { model: null, reasoningEffort: "high" },
+  logging: {
+    maxFileBytes: 5_000_000,
+    maxFilesPerStep: 3,
+    retainRuns: 20,
+    heartbeatSeconds: 15
+  }
 } as const;
 
 export function findConfig(start = process.cwd()): string | null {
@@ -54,10 +60,17 @@ export function loadConfig(path?: string): Config {
     repository,
     worktreeRoot,
     claude: { ...defaults.claude, ...raw.claude },
-    codex: { ...defaults.codex, ...raw.codex }
+    codex: { ...defaults.codex, ...raw.codex },
+    logging: { ...defaults.logging, ...raw.logging }
   };
   if (!Number.isInteger(config.maxReviewCycles) || config.maxReviewCycles < 1) {
     throw new Error("maxReviewCycles must be a positive integer");
+  }
+  for (const key of ["maxFileBytes", "maxFilesPerStep", "retainRuns", "heartbeatSeconds"] as const) {
+    const value = config.logging[key];
+    if (!Number.isInteger(value) || value < 1) {
+      throw new Error(`logging.${key} must be a positive integer`);
+    }
   }
   if (!config.branchPrefix.match(/^[A-Za-z0-9._/-]+$/)) {
     throw new Error("branchPrefix contains unsupported characters");

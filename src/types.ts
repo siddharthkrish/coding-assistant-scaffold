@@ -50,6 +50,25 @@ export type Run = {
   updatedAt: string;
 };
 
+export type LoggingConfig = {
+  maxFileBytes: number;
+  maxFilesPerStep: number;
+  retainRuns: number;
+  heartbeatSeconds: number;
+};
+
+/** Live progress for the step a run is currently executing. */
+export type Activity = {
+  runId: string;
+  step: string;
+  detail: string | null;
+  pid: number | null;
+  ownerPid: number | null;
+  logPath: string | null;
+  startedAt: string;
+  lastActivityAt: string;
+};
+
 export type Config = {
   repository: string;
   baseBranch: string;
@@ -66,4 +85,5 @@ export type Config = {
   commandTimeoutMinutes: number;
   claude: { model: string | null; allowedTools: string };
   codex: { model: string | null; reasoningEffort: string };
+  logging: LoggingConfig;
 };

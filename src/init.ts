@@ -76,6 +76,8 @@ function updateGitignore(root: string): void {
   const entries = [
     ".agent-orchestrator/*.sqlite*",
     ".agent-orchestrator/reviews/",
+    ".agent-orchestrator/logs/",
+    ".agent-orchestrator/artifacts/",
     ".agent-orchestrator/last-checks.txt"
   ];
   const missing = entries.filter((entry) => !existing.split(/\r?\n/).includes(entry));
@@ -92,7 +94,8 @@ function addPackageScripts(root: string): void {
     agents: "agent-orchestrator start",
     "agents:once": "agent-orchestrator run",
     "agents:doctor": "agent-orchestrator doctor",
-    "agents:status": "agent-orchestrator status"
+    "agents:status": "agent-orchestrator status",
+    "agents:logs": "agent-orchestrator logs"
   };
   writeFileSync(path, `${JSON.stringify(manifest, null, 2)}\n`);
 }

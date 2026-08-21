@@ -1,5 +1,7 @@
 import { mkdirSync, readFileSync } from "node:fs";
 import { dirname } from "node:path";
+import type { StepSession } from "./activity.ts";
+import { ClaudeStreamReader } from "./claude-stream.ts";
 import { runCommand } from "./process.ts";
 import { renderPrompt } from "./prompts.ts";
 import type { Config, Review, Run } from "./types.ts";
@@ -8,32 +10,52 @@ function timeout(config: Config): number {
   return config.commandTimeoutMinutes * 60_000;
 }
 
+export type ClaudeOutcome = {
+  sessionId: string | null;
+  /** The final structured `result` event, preserved for inspection. */
+  result: Record<string, unknown> | null;
+};
+
+/**
+ * Runs Claude Code in streaming mode so each tool call and message is visible while
+ * the run is in flight, instead of only after the process exits.
+ */
 export async function invokeClaude(
   config: Config,
   run: Run,
   prompt: string,
-  resume = false
-): Promise<string | null> {
+  resume = false,
+  session?: StepSession
+): Promise<ClaudeOutcome> {
   const args = [
     "--print",
-    "--output-format", "json",
+    "--output-format", "stream-json",
+    "--verbose",
     "--permission-mode", "acceptEdits",
     "--allowedTools", config.claude.allowedTools
   ];
   if (config.claude.model) args.push("--model", config.claude.model);
   if (resume && run.claudeSessionId) args.push("--resume", run.claudeSessionId);
-  const result = await runCommand("claude", args, {
+  const reader = new ClaudeStreamReader(run.claudeSessionId);
+  const report = (lines: string[]) => {
+    for (const line of lines) {
+      if (session) session.progress(`claude ${line}`);
+      else console.log(`  claude ${line}`);
+    }
+  };
+  const consume = (stream: "stdout" | "stderr", chunk: string) => {
+    if (stream === "stdout") report(reader.push(chunk));
+    else if (session) session.output(chunk);
+    else process.stderr.write(chunk);
+  };
+  await runCommand("claude", args, {
     cwd: run.worktree,
     stdin: prompt,
     timeoutMs: timeout(config),
-    quiet: false
+    ...(session?.commandHooks("claude", consume) ?? { onData: consume })
   });
-  try {
-    const parsed = JSON.parse(result.stdout);
-    return parsed.session_id ?? parsed.sessionId ?? run.claudeSessionId;
-  } catch {
-    return run.claudeSessionId;
-  }
+  report(reader.end());
+  return { sessionId: reader.sessionId ?? run.claudeSessionId, result: reader.result };
 }
 
 export async function invokeCodexReview(
@@ -41,7 +63,8 @@ export async function invokeCodexReview(
   run: Run,
   schemaPath: string,
   outputPath: string,
-  finalReview: boolean
+  finalReview: boolean,
+  session?: StepSession
 ): Promise<Review> {
   mkdirSync(dirname(outputPath), { recursive: true });
   const args = [
@@ -71,7 +94,7 @@ Acceptance context:
     cwd: run.worktree,
     stdin: prompt,
     timeoutMs: timeout(config),
-    quiet: false
+    ...(session?.commandHooks("codex") ?? {})
   });
   const review = JSON.parse(readFileSync(outputPath, "utf8")) as Review;
   validateReview(review);

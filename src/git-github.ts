@@ -1,5 +1,6 @@
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
+import type { StepSession } from "./activity.ts";
 import { runCommand } from "./process.ts";
 import { detectTestCommand } from "./project.ts";
 import type { Config, Issue, Run } from "./types.ts";
@@ -33,7 +34,7 @@ export async function prepareWorktree(config: Config, run: Run): Promise<void> {
   await runCommand("git", ["worktree", "add", "-b", run.branch, run.worktree, `${config.remote}/${config.baseBranch}`], { cwd: config.repository });
 }
 
-export async function runTests(config: Config, run: Run): Promise<void> {
+export async function runTests(config: Config, run: Run, session?: StepSession): Promise<void> {
   const testCommand = config.testCommand === "auto"
     ? detectTestCommand(run.worktree)
     : config.testCommand;
@@ -42,10 +43,12 @@ export async function runTests(config: Config, run: Run): Promise<void> {
       "Unable to detect a test command after implementation. Set testCommand in .agent-orchestrator/config.json."
     );
   }
-  console.log(`Running tests: ${testCommand}`);
+  if (session) session.progress(`running tests: ${testCommand}`);
+  else console.log(`Running tests: ${testCommand}`);
   await runCommand("sh", ["-lc", testCommand], {
     cwd: run.worktree,
-    timeoutMs: config.commandTimeoutMinutes * 60_000
+    timeoutMs: config.commandTimeoutMinutes * 60_000,
+    ...(session?.commandHooks("tests") ?? {})
   });
 }
 

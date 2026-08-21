@@ -1,7 +1,7 @@
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import type { Issue, Run, RunStatus } from "./types.ts";
+import type { Activity, Issue, Run, RunStatus } from "./types.ts";
 
 const columns = `id, issue_number, issue_title, issue_body, issue_url, status, branch,
   worktree, pr_number, review_cycle, reviewed_sha, claude_session_id, last_error,
@@ -38,6 +38,16 @@ export class StateStore {
         status TEXT NOT NULL,
         detail TEXT,
         created_at TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS activity (
+        run_id TEXT PRIMARY KEY,
+        step TEXT NOT NULL,
+        detail TEXT,
+        pid INTEGER,
+        owner_pid INTEGER,
+        log_path TEXT,
+        started_at TEXT NOT NULL,
+        last_activity_at TEXT NOT NULL
       );
     `);
   }
@@ -85,6 +95,43 @@ export class StateStore {
     return next;
   }
 
+  /** Records the sub-step a run just entered, replacing any previous activity row. */
+  beginStep(runId: string, step: string, detail: string | null, logPath: string | null, ownerPid = process.pid): Activity {
+    const now = new Date().toISOString();
+    this.db.prepare(
+      `INSERT INTO activity (run_id, step, detail, pid, owner_pid, log_path, started_at, last_activity_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(run_id) DO UPDATE SET
+         step=excluded.step, detail=excluded.detail, pid=NULL, owner_pid=excluded.owner_pid,
+         log_path=excluded.log_path, started_at=excluded.started_at, last_activity_at=excluded.last_activity_at`
+    ).run(runId, step, detail, null, ownerPid, logPath, now, now);
+    return this.activity(runId)!;
+  }
+
+  /** Attaches (or clears) the pid of the child process the step is waiting on. */
+  attachProcess(runId: string, pid: number | null): void {
+    this.db.prepare("UPDATE activity SET pid=?, last_activity_at=? WHERE run_id=?").run(
+      pid ?? null, new Date().toISOString(), runId
+    );
+  }
+
+  /** Bumps the liveness timestamp, optionally with a new sub-step detail. */
+  heartbeat(runId: string, detail?: string | null): void {
+    const now = new Date().toISOString();
+    if (detail === undefined) {
+      this.db.prepare("UPDATE activity SET last_activity_at=? WHERE run_id=?").run(now, runId);
+    } else {
+      this.db.prepare("UPDATE activity SET last_activity_at=?, detail=? WHERE run_id=?").run(now, detail, runId);
+    }
+  }
+
+  activity(runId: string): Activity | null {
+    const row = this.db.prepare(
+      "SELECT run_id, step, detail, pid, owner_pid, log_path, started_at, last_activity_at FROM activity WHERE run_id = ?"
+    ).get(runId);
+    return row ? mapActivity(row as Record<string, unknown>) : null;
+  }
+
   event(id: string, status: string, detail: string | null): void {
     this.db.prepare("INSERT INTO events (run_id, status, detail, created_at) VALUES (?, ?, ?, ?)").run(
       id, status, detail, new Date().toISOString()
@@ -92,6 +139,19 @@ export class StateStore {
   }
 
   close(): void { this.db.close(); }
+}
+
+function mapActivity(row: Record<string, unknown>): Activity {
+  return {
+    runId: String(row.run_id),
+    step: String(row.step),
+    detail: row.detail === null ? null : String(row.detail),
+    pid: row.pid === null ? null : Number(row.pid),
+    ownerPid: row.owner_pid === null ? null : Number(row.owner_pid),
+    logPath: row.log_path === null ? null : String(row.log_path),
+    startedAt: String(row.started_at),
+    lastActivityAt: String(row.last_activity_at)
+  };
 }
 
 function mapRun(row: Record<string, unknown>): Run {
