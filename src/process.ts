@@ -19,7 +19,19 @@ export type CommandOptions = {
   /** Fired on an interval while the child is alive so liveness can be recorded. */
   onHeartbeat?: () => void;
   heartbeatMs?: number;
+  /**
+   * Caps how much of each stream is retained in memory, keeping the most recent
+   * characters. Callers that stream output elsewhere should set this so a long
+   * agent run cannot grow the buffers without bound; callers that parse the full
+   * result (`gh --json`, `git rev-parse`) must leave it unset.
+   */
+  captureBytes?: number;
 };
+
+function appendCapped(buffer: string, chunk: string, limit: number | undefined): string {
+  const next = buffer + chunk;
+  return limit && next.length > limit ? next.slice(next.length - limit) : next;
+}
 
 export async function runCommand(
   command: string,
@@ -46,12 +58,12 @@ export async function runCommand(
   child.stdout.setEncoding("utf8");
   child.stderr.setEncoding("utf8");
   child.stdout.on("data", (chunk) => {
-    stdout += chunk;
+    stdout = appendCapped(stdout, chunk, options.captureBytes);
     if (options.onData) options.onData("stdout", chunk);
     else if (!options.quiet) process.stdout.write(chunk);
   });
   child.stderr.on("data", (chunk) => {
-    stderr += chunk;
+    stderr = appendCapped(stderr, chunk, options.captureBytes);
     if (options.onData) options.onData("stderr", chunk);
     else if (!options.quiet) process.stderr.write(chunk);
   });

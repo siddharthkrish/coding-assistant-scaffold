@@ -88,17 +88,23 @@ Claude Code runs in streaming mode, so each message and tool call is reported wh
 .agent-orchestrator/artifacts/issue-<n>/*.json       # final Claude result and each Codex review
 ```
 
-Logs and artifacts are scrubbed of credential-shaped values before they are written, and log files rotate so continuous `start` mode cannot grow storage without bound. Tune this under `logging` in the config: `maxFileBytes`, `maxFilesPerStep`, `retainRuns`, and `heartbeatSeconds`.
+Logs, artifacts, and everything `status` prints are scrubbed of credential-shaped values, including quoted JSON fields and multiline private keys. Log files rotate so continuous `start` mode cannot grow storage without bound, and streamed output is not accumulated in memory — only a tail is kept for error messages. Tune this under `logging` in the config: `maxFileBytes`, `maxFilesPerStep`, `retainRuns`, and `heartbeatSeconds`.
+
+Console output and the `status` sub-step show a short summary, while the log keeps the full assistant message, tool input, and tool result output — including failures — so a stuck run can be diagnosed after the fact.
+
+These directories are created self-ignoring, so upgrading an existing installation never leaves untracked runtime files in the checkout, regardless of what its `.gitignore` contains.
 
 While a step runs, the orchestrator records a heartbeat with the child process ID. `status` uses that to distinguish live work from a run whose orchestrator has exited:
 
 | liveness | meaning |
 | --- | --- |
-| `running` | a Claude, Codex, or test process is currently executing |
+| `running` | the orchestrator is alive and a Claude, Codex, or test process is executing |
 | `waiting` | the orchestrator owns the run but no child process is active |
 | `stale` | the orchestrator is alive but has not reported progress recently |
 | `orphaned` | the orchestrator process is gone; re-run `resume --issue N` |
 | `done` | the run reached a terminal state |
+
+Liveness is decided by the orchestrator process, not the child: a run whose orchestrator died is `orphaned` even if a Claude or Codex process is still running, since nothing can advance its state. The surviving child is still reported separately (`childAlive` in `status --json`) so it can be stopped before resuming.
 
 To watch a run that appears stuck:
 

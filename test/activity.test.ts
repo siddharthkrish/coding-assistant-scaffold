@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
 import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { ActivityTracker } from "../src/activity.ts";
+import { ActivityTracker, errorTailBytes } from "../src/activity.ts";
 import { runCommand } from "../src/process.ts";
 import { StateStore } from "../src/state-store.ts";
 import { statusRows } from "../src/status.ts";
@@ -85,6 +86,69 @@ test("a tracked child process is attached, heartbeats, and is cleared on exit", 
   }
 });
 
+test("credentials in progress text are redacted before every sink", (t) => {
+  const { store, run, tracker } = fixture();
+  const printed: string[] = [];
+  t.mock.method(console, "log", (line: string) => { printed.push(line); });
+  const loud = new ActivityTracker(
+    store,
+    { pollIntervalSeconds: 30, logging: { maxFileBytes: 5_000_000, maxFilesPerStep: 3, retainRuns: 20, heartbeatSeconds: 1 } } as Config,
+    join(run.worktree, "..", "loud-runtime"),
+    false
+  );
+  try {
+    const session = loud.begin(run, "implementing");
+    session.progress("claude tool Bash(curl -H 'Authorization: Bearer abcdef123456789' https://api.example.test)");
+    session.logger.flush();
+
+    const stored = store.activity(run.id)!.detail!;
+    const logged = readFileSync(session.logPath, "utf8");
+    const console_ = printed.join("\n");
+    for (const sink of [stored, logged, console_]) {
+      assert.doesNotMatch(sink, /abcdef123456789/, "no sink may retain the credential");
+    }
+    assert.match(stored, /\[redacted\]/);
+    assert.match(logged, /curl -H/, "the surrounding command must stay legible");
+    session.end("done");
+  } finally {
+    store.close();
+  }
+});
+
+test("credentials in a failure message are redacted before every sink", () => {
+  const { store, run, tracker } = fixture();
+  try {
+    const session = tracker.begin(run, "implementing");
+    session.fail("sh exited with 1: fatal: could not read password: ghp_abcdefghijklmnopqrstuvwxyz0123");
+    assert.doesNotMatch(store.activity(run.id)!.detail!, /ghp_abcdefghijklmnopqrstuvwxyz0123/);
+    assert.doesNotMatch(readFileSync(session.logPath, "utf8"), /ghp_abcdefghijklmnopqrstuvwxyz0123/);
+  } finally {
+    store.close();
+  }
+});
+
+test("streamed commands retain only an error tail in memory", async () => {
+  const { store, run, tracker } = fixture();
+  try {
+    const session = tracker.begin(run, "implementing");
+    const result = await runCommand(
+      "node",
+      ["-e", "for (let i = 0; i < 20000; i += 1) console.log('noisy output line ' + i)"],
+      session.commandHooks("child")
+    );
+    // The child emits well over 300 KB; only the bounded tail is kept.
+    assert.ok(result.stdout.length <= errorTailBytes, `retained ${result.stdout.length} characters`);
+    assert.match(result.stdout, /noisy output line 19999/, "the tail must survive for error messages");
+    session.logger.flush();
+    // Nothing is lost: the full stream still reached the rotating log.
+    const logged = readFileSync(session.logPath, "utf8");
+    assert.match(logged, /noisy output line 19999/);
+    session.end("done");
+  } finally {
+    store.close();
+  }
+});
+
 test("track closes the step and rethrows when the body fails", async () => {
   const { store, run, tracker } = fixture();
   try {
@@ -124,6 +188,57 @@ test("status reports a live run and flags an orphaned one", async () => {
 
     store.update(run.id, "completed");
     assert.equal(statusRows(store, 60)[0].liveness, "done");
+  } finally {
+    store.close();
+  }
+});
+
+test("a dead orchestrator is orphaned even while its child is still running", async () => {
+  const { store, run, tracker } = fixture();
+  const child = spawn("node", ["-e", "setTimeout(() => {}, 30000)"], { stdio: "ignore" });
+  try {
+    const session = tracker.begin(run, "implementing");
+    store.update(run.id, "implementing");
+    const deadOwner = await exitedPid();
+    store.beginStep(run.id, "implementing", "working", session.logPath, deadOwner);
+    store.attachProcess(run.id, child.pid!);
+
+    const row = statusRows(store, 60)[0];
+    // A surviving Claude or Codex child cannot advance the run on its own.
+    assert.equal(row.liveness, "orphaned");
+    assert.equal(row.childAlive, true, "the live child must still be reported");
+    assert.equal(row.ownerAlive, false);
+    assert.equal(row.pid, child.pid);
+  } finally {
+    child.kill("SIGKILL");
+    store.close();
+  }
+});
+
+test("a live orchestrator running a child reports as running", async () => {
+  const { store, run, tracker } = fixture();
+  const child = spawn("node", ["-e", "setTimeout(() => {}, 30000)"], { stdio: "ignore" });
+  try {
+    tracker.begin(run, "implementing");
+    store.update(run.id, "implementing");
+    store.attachProcess(run.id, child.pid!);
+    const row = statusRows(store, 60)[0];
+    assert.equal(row.liveness, "running");
+    assert.equal(row.childAlive, true);
+    assert.equal(row.ownerAlive, true);
+  } finally {
+    child.kill("SIGKILL");
+    store.close();
+  }
+});
+
+test("status redacts credentials recorded in a run error", () => {
+  const { store, run } = fixture();
+  try {
+    store.update(run.id, "implementing", {
+      lastError: "gh exited with 1: token=ghp_abcdefghijklmnopqrstuvwxyz0123"
+    });
+    assert.doesNotMatch(statusRows(store, 60)[0].error!, /ghp_abcdefghijklmnopqrstuvwxyz0123/);
   } finally {
     store.close();
   }

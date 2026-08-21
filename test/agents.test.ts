@@ -8,19 +8,23 @@ import { invokeClaude } from "../src/agents.ts";
 import { StateStore } from "../src/state-store.ts";
 import type { Config, Run } from "../src/types.ts";
 
+const failureOutput = "FAIL test/widget.test.ts\n  AssertionError: expected 1 to equal 2\n    at widget.test.ts:14:3";
+
 const events = [
   { type: "system", subtype: "init", session_id: "sess-live", model: "claude-opus-5" },
   { type: "assistant", message: { content: [{ type: "tool_use", name: "Bash", input: { command: "npm test" } }] } },
+  { type: "user", message: { content: [{ type: "tool_result", is_error: true, content: failureOutput }] } },
+  { type: "assistant", message: { content: [{ type: "text", text: `Diagnosis: ${"detail ".repeat(60)}end-of-analysis` }] } },
   { type: "result", subtype: "success", session_id: "sess-live", num_turns: 3, result: "implemented" }
 ];
 
 /** Installs a fake `claude` on PATH that emits NDJSON and records its arguments. */
-function fakeClaude(directory: string): { argsPath: string; path: string } {
+function fakeClaude(directory: string, extra: unknown[] = []): { argsPath: string; path: string } {
   const binDir = join(directory, "bin");
   mkdirSync(binDir, { recursive: true });
   const argsPath = join(directory, "args.txt");
   const script = join(binDir, "claude");
-  const lines = events.map((event) => JSON.stringify(event));
+  const lines = [...events, ...extra].map((event) => JSON.stringify(event));
   writeFileSync(script, [
     "#!/bin/sh",
     `printf '%s\\n' "$@" > ${JSON.stringify(argsPath)}`,
@@ -74,6 +78,38 @@ test("invokeClaude streams progress to the step log and returns the final result
   assert.match(log, /tool Bash\(npm test\)/);
   assert.match(log, /result: success, 3 turns/);
   assert.equal(store.activity(run.id)?.pid, null);
+
+  // Diagnostics, not just summaries: the failing tool's output and the full
+  // assistant message must be inspectable in the log.
+  assert.match(log, /tool result \(error\)/);
+  assert.match(log, /AssertionError: expected 1 to equal 2/);
+  assert.match(log, /at widget\.test\.ts:14:3/);
+  assert.match(log, /end-of-analysis/, "a long message must not be truncated in the log");
+  // The activity row keeps only the short summary.
+  assert.ok((store.activity(run.id)?.detail?.length ?? 0) <= 200);
+});
+
+test("invokeClaude redacts credentials from streamed events before they are stored", async (t) => {
+  const { store, run, config, tracker, runtime } = fixture();
+  const fake = fakeClaude(runtime, [
+    {
+      type: "assistant",
+      message: { content: [{ type: "tool_use", name: "Bash", input: { command: "curl -H 'Authorization: Bearer abcdef123456789' https://api.example.test" } }] }
+    }
+  ]);
+  const originalPath = process.env.PATH;
+  process.env.PATH = `${fake.path}:${originalPath}`;
+  t.after(() => { process.env.PATH = originalPath; store.close(); });
+
+  const session = tracker.begin(run, "implementing");
+  await invokeClaude(config, run, "do the thing", false, session);
+  session.logger.flush();
+
+  const log = readFileSync(session.logPath, "utf8");
+  assert.doesNotMatch(log, /abcdef123456789/, "the log must not retain the credential");
+  assert.doesNotMatch(store.activity(run.id)!.detail!, /abcdef123456789/);
+  assert.match(log, /curl -H/, "the rest of the command stays legible");
+  session.end("done");
 });
 
 test("invokeClaude resumes the recorded session when fixing", async (t) => {

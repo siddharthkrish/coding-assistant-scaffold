@@ -3,6 +3,9 @@ import type { CommandOptions } from "./process.ts";
 import type { StateStore } from "./state-store.ts";
 import type { Config, Run } from "./types.ts";
 
+/** Retained tail of a streamed child's output, used only for failure messages. */
+export const errorTailBytes = 64_000;
+
 /**
  * One observable sub-step of a run. Owns the step's log file, publishes progress to
  * the console, and keeps the persisted activity row fresh so `status` can tell live
@@ -38,11 +41,19 @@ export class StepSession {
 
   /** Records a progress line: console (unless quiet), log file, and heartbeat detail. */
   progress(text: string): void {
-    const trimmed = text.trim();
-    if (!trimmed) return;
-    this.logger.note(trimmed);
-    this.#store.heartbeat(this.#runId, trimmed.slice(0, 200));
-    if (!this.#quiet) console.log(`  ${this.step}: ${trimmed}`);
+    // Agent messages and tool commands can quote credentials, so redact once here
+    // and use the result for every sink: log file, activity row, and console.
+    const safe = redact(text).trim();
+    if (!safe) return;
+    this.logger.note(safe);
+    this.#store.heartbeat(this.#runId, safe.slice(0, 200));
+    if (!this.#quiet) console.log(`  ${this.step}: ${safe}`);
+  }
+
+  /** Writes fuller diagnostics to the bounded log without touching other sinks. */
+  detail(text: string): void {
+    if (!text.trim()) return;
+    this.logger.write(text.endsWith("\n") ? text : `${text}\n`);
   }
 
   /** Raw output from a child process; logged, echoed, and treated as liveness. */
@@ -71,7 +82,10 @@ export class StepSession {
         else this.output(chunk);
       },
       onHeartbeat: () => this.beat(),
-      heartbeatMs: this.heartbeatMs
+      heartbeatMs: this.heartbeatMs,
+      // Streamed output already reaches the rotating log, so retain only enough to
+      // build a useful error message if the child exits non-zero.
+      captureBytes: errorTailBytes
     };
   }
 
@@ -82,8 +96,10 @@ export class StepSession {
   }
 
   fail(message: string): void {
-    this.logger.note(`FAILED: ${message}`);
-    this.#store.heartbeat(this.#runId, `failed: ${message}`.slice(0, 200));
+    // Command failures embed child stderr, which is a common place for secrets.
+    const safe = redact(message);
+    this.logger.note(`FAILED: ${safe}`);
+    this.#store.heartbeat(this.#runId, `failed: ${safe}`.slice(0, 200));
     this.#store.attachProcess(this.#runId, null);
     this.logger.close();
   }

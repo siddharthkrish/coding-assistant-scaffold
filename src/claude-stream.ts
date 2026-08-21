@@ -5,6 +5,14 @@
  * short raw line rather than dropped, so a CLI change degrades progress reporting
  * instead of breaking a run.
  */
+/**
+ * One reported event. `summary` is short enough for the console and the activity
+ * row; `detail` keeps the full text — assistant messages, tool inputs, and tool
+ * result output including errors — for the bounded rotating log, so a failing or
+ * stuck run can actually be diagnosed afterwards.
+ */
+export type ClaudeProgress = { summary: string; detail: string };
+
 export class ClaudeStreamReader {
   sessionId: string | null = null;
   result: Record<string, unknown> | null = null;
@@ -14,42 +22,103 @@ export class ClaudeStreamReader {
     this.sessionId = initialSessionId;
   }
 
-  /** Consumes a chunk and returns human-readable progress lines. */
-  push(chunk: string): string[] {
+  /** Consumes a chunk and returns progress entries for each complete event. */
+  push(chunk: string): ClaudeProgress[] {
     this.#pending += chunk;
-    const lines: string[] = [];
+    const entries: ClaudeProgress[] = [];
     let index = this.#pending.indexOf("\n");
     while (index >= 0) {
       const line = this.#pending.slice(0, index);
       this.#pending = this.#pending.slice(index + 1);
-      const summary = this.#consume(line);
-      if (summary) lines.push(summary);
+      const entry = this.#consume(line);
+      if (entry) entries.push(entry);
       index = this.#pending.indexOf("\n");
     }
-    return lines;
+    return entries;
   }
 
   /** Flushes any trailing partial line at end of stream. */
-  end(): string[] {
+  end(): ClaudeProgress[] {
     const remainder = this.#pending;
     this.#pending = "";
-    const summary = remainder ? this.#consume(remainder) : null;
-    return summary ? [summary] : [];
+    const entry = remainder ? this.#consume(remainder) : null;
+    return entry ? [entry] : [];
   }
 
-  #consume(line: string): string | null {
+  #consume(line: string): ClaudeProgress | null {
     const text = line.trim();
     if (!text) return null;
     let event: Record<string, unknown>;
     try {
       event = JSON.parse(text) as Record<string, unknown>;
     } catch {
-      return truncate(text, 300);
+      return { summary: truncate(text, 300), detail: text };
     }
     const session = event.session_id ?? event.sessionId;
     if (typeof session === "string" && session) this.sessionId = session;
     if (event.type === "result") this.result = event;
-    return summarize(event);
+    const summary = summarize(event);
+    if (!summary) return null;
+    return { summary, detail: detailOf(event, summary) };
+  }
+}
+
+/** Full, unabridged text for the log; falls back to the summary when equivalent. */
+function detailOf(event: Record<string, unknown>, summary: string): string {
+  switch (event.type) {
+    case "assistant":
+      return assistantDetail(event) || summary;
+    case "user":
+      return toolResultDetail(event) || summary;
+    case "result":
+      return `${summary}\n${stringify(event)}`;
+    case "system":
+      return summary;
+    default:
+      return `${summary}\n${stringify(event)}`;
+  }
+}
+
+function assistantDetail(event: Record<string, unknown>): string {
+  const parts: string[] = [];
+  for (const block of contentBlocks(event)) {
+    if (block.type === "text" && typeof block.text === "string" && block.text.trim()) {
+      parts.push(block.text.trim());
+    } else if (block.type === "tool_use") {
+      parts.push(`tool ${String(block.name ?? "unknown")} input:\n${stringify(block.input)}`);
+    }
+  }
+  return parts.join("\n");
+}
+
+function toolResultDetail(event: Record<string, unknown>): string {
+  const parts: string[] = [];
+  for (const block of contentBlocks(event)) {
+    if (block.type !== "tool_result") continue;
+    const status = block.is_error === true ? "tool result (error)" : "tool result";
+    parts.push(`${status}:\n${textOf(block.content)}`);
+  }
+  return parts.join("\n");
+}
+
+/** Renders tool result content, which may be a string or a content-block array. */
+function textOf(content: unknown): string {
+  if (typeof content === "string") return content;
+  if (Array.isArray(content)) {
+    return content
+      .map((block) => (block && typeof block === "object" && typeof (block as Record<string, unknown>).text === "string"
+        ? String((block as Record<string, unknown>).text)
+        : stringify(block)))
+      .join("\n");
+  }
+  return stringify(content);
+}
+
+function stringify(value: unknown): string {
+  try {
+    return JSON.stringify(value, null, 2) ?? String(value);
+  } catch {
+    return String(value);
   }
 }
 

@@ -1,6 +1,6 @@
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
-import type { StepSession } from "./activity.ts";
+import { errorTailBytes, type StepSession } from "./activity.ts";
 import { runCommand } from "./process.ts";
 import { detectTestCommand } from "./project.ts";
 import type { Config, Issue, Run } from "./types.ts";
@@ -48,6 +48,8 @@ export async function runTests(config: Config, run: Run, session?: StepSession):
   await runCommand("sh", ["-lc", testCommand], {
     cwd: run.worktree,
     timeoutMs: config.commandTimeoutMinutes * 60_000,
+    // A verbose suite can emit far more than the failure message needs.
+    captureBytes: errorTailBytes,
     ...(session?.commandHooks("tests") ?? {})
   });
 }

@@ -8,6 +8,20 @@ import type { LoggingConfig } from "./types.ts";
 export const logsDirectory = "logs";
 export const artifactsDirectory = "artifacts";
 
+/**
+ * Creates a runtime directory that Git ignores entirely, including the marker
+ * itself. Repositories initialized by an earlier version have a `.gitignore`
+ * without rules for these paths; relying on the project `.gitignore` alone would
+ * leave streamed logs untracked in the checkout, which both exposes agent output
+ * and makes `fastForwardLocalMain` refuse to sync a dirty repository after a merge.
+ */
+export function ensureIgnoredDirectory(path: string): string {
+  mkdirSync(path, { recursive: true });
+  const marker = resolve(path, ".gitignore");
+  if (!existsSync(marker)) writeFileSync(marker, "*\n");
+  return path;
+}
+
 const secretPatterns: Array<[RegExp, string]> = [
   [/-----BEGIN (?:[A-Z ]+ )?PRIVATE KEY-----[\s\S]*?-----END (?:[A-Z ]+ )?PRIVATE KEY-----/g, "[redacted private key]"],
   [/gh[pousr]_[A-Za-z0-9]{16,}/g, "[redacted github token]"],
@@ -18,19 +32,39 @@ const secretPatterns: Array<[RegExp, string]> = [
   [/eyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/g, "[redacted jwt]"]
 ];
 
-const assignmentPattern =
-  /\b(authorization|api[-_]?keys?|access[-_]?tokens?|tokens?|secrets?|passwords?|passwd|credentials?)\b(\s*(?:[:=]|=>)\s*|\s+)(?:Bearer\s+)?["']?([^\s"',;]{6,})/gi;
+const credentialKeys =
+  "authorization|api[-_]?keys?|access[-_]?tokens?|auth[-_]?tokens?|tokens?|secrets?|passwords?|passwd|credentials?";
 
-/** Strips credential-shaped substrings so persisted logs never carry secrets. */
+/**
+ * Matches `key = value`, `key: value`, and the quoted `"key": "value"` form used by
+ * JSON. The closing quote is left outside the match so replacing only the value
+ * keeps structured records parseable.
+ */
+const assignmentPattern = new RegExp(
+  `(\\b(?:${credentialKeys})\\b["']?\\s*(?:[:=]|=>)\\s*["']?)(?:Bearer\\s+)?([^\\s"',;}\\])]{6,})`,
+  "gi"
+);
+
+// The value group stops before `]`, so an already-redacted value arrives here as
+// `[redacted` rather than `[redacted]`; matching on the prefix keeps redact()
+// idempotent instead of appending a bracket on every pass.
+const placeholders = /^(?:null|true|false|undefined|none|\[redacted.*)$/i;
+
+export const privateKeyStart = /-----BEGIN (?:[A-Z ]+ )?PRIVATE KEY-----/;
+export const privateKeyEnd = /-----END (?:[A-Z ]+ )?PRIVATE KEY-----/;
+
+/**
+ * Strips credential-shaped substrings so persisted output never carries secrets.
+ * Safe on structured records: only the value side of an assignment is replaced, so
+ * redacted JSON stays valid JSON.
+ */
 export function redact(text: string): string {
   let output = text;
   for (const [pattern, replacement] of secretPatterns) {
     output = output.replace(pattern, replacement);
   }
-  return output.replace(assignmentPattern, (match, key, separator) => {
-    if (/^(?:null|true|false|undefined|none)$/i.test(match.split(separator).pop() ?? "")) return match;
-    return `${key}${separator}[redacted]`;
-  });
+  return output.replace(assignmentPattern, (match, prefix: string, value: string) =>
+    placeholders.test(value) ? match : `${prefix}[redacted]`);
 }
 
 /**
@@ -45,12 +79,13 @@ export class StepLogger {
   #pending = "";
   #bytes = 0;
   #closed = false;
+  #inPrivateKey = false;
 
   constructor(path: string, limits: Pick<LoggingConfig, "maxFileBytes" | "maxFilesPerStep">) {
     this.path = path;
     this.maxBytes = Math.max(1024, limits.maxFileBytes);
     this.maxFiles = Math.max(1, limits.maxFilesPerStep);
-    mkdirSync(resolve(path, ".."), { recursive: true });
+    ensureIgnoredDirectory(resolve(path, ".."));
     if (!existsSync(path)) writeFileSync(path, "");
     this.#bytes = statSync(path).size;
   }
@@ -88,8 +123,26 @@ export class StepLogger {
     this.#closed = true;
   }
 
+  /**
+   * Redacts and appends one line. A PEM block spans many lines, so the single-line
+   * redaction pass can never see it whole; the block is suppressed with a state
+   * machine instead and replaced by one placeholder.
+   */
   #emit(line: string): void {
-    const text = `${redact(line)}\n`;
+    if (this.#inPrivateKey) {
+      if (privateKeyEnd.test(line)) this.#inPrivateKey = false;
+      return;
+    }
+    if (privateKeyStart.test(line) && !privateKeyEnd.test(line)) {
+      this.#inPrivateKey = true;
+      this.#append("[redacted private key]");
+      return;
+    }
+    this.#append(redact(line));
+  }
+
+  #append(line: string): void {
+    const text = `${line}\n`;
     const size = Buffer.byteLength(text);
     if (this.#bytes + size > this.maxBytes) this.#rotate();
     appendFileSync(this.path, text);
@@ -123,7 +176,7 @@ export function artifactPath(runtimeDir: string, issueNumber: number, name: stri
 
 /** Persists a structured artifact (Claude result, Codex review) for later inspection. */
 export function writeArtifact(path: string, value: unknown): string {
-  mkdirSync(resolve(path, ".."), { recursive: true });
+  ensureIgnoredDirectory(resolve(path, ".."));
   const text = typeof value === "string" ? value : JSON.stringify(value, null, 2);
   writeFileSync(path, redact(text));
   return path;

@@ -1,3 +1,4 @@
+import { redact } from "./logging.ts";
 import { isProcessAlive } from "./process.ts";
 import type { StateStore } from "./state-store.ts";
 import type { Run } from "./types.ts";
@@ -13,6 +14,9 @@ export type StatusRow = {
   pr: number | null;
   pid: number | null;
   ownerPid: number | null;
+  /** Whether the child process is still running, reported independently of `liveness`. */
+  childAlive: boolean;
+  ownerAlive: boolean;
   session: string | null;
   detail: string | null;
   lastActivityAt: string | null;
@@ -49,14 +53,18 @@ function buildRow(run: Run, store: StateStore, staleAfterSeconds: number, now: n
     pr: run.prNumber,
     pid: activity?.pid ?? null,
     ownerPid: activity?.ownerPid ?? null,
+    childAlive: isProcessAlive(activity?.pid),
+    ownerAlive: isProcessAlive(activity?.ownerPid),
     session: run.claudeSessionId,
-    detail: activity?.detail ?? null,
+    detail: activity?.detail ? redact(activity.detail) : null,
     lastActivityAt: activity?.lastActivityAt ?? null,
     idleSeconds,
     elapsedSeconds,
     logPath: activity?.logPath ?? null,
     updatedAt: run.updatedAt,
-    error: run.lastError
+    // lastError carries child stderr, which is written by the orchestrator rather
+    // than through a step session, so it is redacted at the display boundary.
+    error: run.lastError ? redact(run.lastError) : null
   };
 }
 
@@ -68,9 +76,11 @@ function liveness(
 ): Liveness {
   if (terminal) return "done";
   if (!activity) return "waiting";
-  if (isProcessAlive(activity.pid)) return "running";
-  // No child process: the run is only alive if the orchestrator that owns it is.
+  // The owner is checked first on purpose. A surviving Claude, Codex, or test
+  // child cannot advance the run once the orchestrator is gone, so reporting it as
+  // `running` would recreate exactly the misleading status this is meant to fix.
   if (!isProcessAlive(activity.ownerPid)) return "orphaned";
+  if (isProcessAlive(activity.pid)) return "running";
   if (idleSeconds !== null && idleSeconds > staleAfterSeconds) return "stale";
   return "waiting";
 }

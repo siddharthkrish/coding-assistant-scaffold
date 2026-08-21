@@ -143,6 +143,9 @@ function printStatus(store: StateStore, config: Config, asJson: boolean): void {
     if (row.logPath) console.log(`  log:      ${row.logPath}`);
     if (row.liveness === "orphaned") {
       console.log("  The orchestrator process for this run is gone. Re-run `resume --issue N` to continue it.");
+      if (row.childAlive) {
+        console.log(`  A child process (pid ${row.pid}) is still running and cannot advance the run; stop it before resuming.`);
+      }
     }
     if (row.liveness === "stale") {
       console.log("  No progress recorded recently; inspect the log above to see where it is waiting.");

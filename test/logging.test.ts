@@ -35,6 +35,66 @@ test("redaction leaves ordinary agent output intact", () => {
   assert.equal(redact(text), text);
 });
 
+test("redaction scrubs quoted JSON credential fields without breaking the JSON", () => {
+  const record = { password: "hunter2hunter2", token: "abcdef123456", note: "keep me", retries: 3 };
+  const output = redact(JSON.stringify(record));
+  assert.doesNotMatch(output, /hunter2hunter2/);
+  assert.doesNotMatch(output, /abcdef123456/);
+  const parsed = JSON.parse(output);
+  assert.equal(parsed.password, "[redacted]");
+  assert.equal(parsed.token, "[redacted]");
+  assert.equal(parsed.note, "keep me");
+  assert.equal(parsed.retries, 3);
+});
+
+test("redaction survives pretty-printed JSON and leaves placeholder values alone", () => {
+  const output = redact(JSON.stringify({ api_key: "supersecretvalue", secret: null }, null, 2));
+  const parsed = JSON.parse(output);
+  assert.equal(parsed.api_key, "[redacted]");
+  assert.equal(parsed.secret, null);
+});
+
+test("redaction is idempotent", () => {
+  const once = redact(JSON.stringify({ password: "hunter2hunter2" }));
+  assert.equal(redact(once), once);
+});
+
+test("step logger suppresses a private key spanning many lines", () => {
+  const dir = workspace();
+  const path = join(dir, "implementing.log");
+  const logger = new StepLogger(path, limits);
+  logger.write([
+    "before the key",
+    "-----BEGIN RSA PRIVATE KEY-----",
+    "MIIEowIBAAKCAQEAsecretkeymaterialline1",
+    "MIIEowIBAAKCAQEAsecretkeymaterialline2",
+    "-----END RSA PRIVATE KEY-----",
+    "after the key",
+    ""
+  ].join("\n"));
+  logger.close();
+  const content = readFileSync(path, "utf8");
+  assert.doesNotMatch(content, /secretkeymaterial/);
+  assert.doesNotMatch(content, /BEGIN RSA PRIVATE KEY/);
+  assert.match(content, /\[redacted private key\]/);
+  // Surrounding output must still be readable.
+  assert.match(content, /before the key/);
+  assert.match(content, /after the key/);
+});
+
+test("artifacts redact generic credential fields and stay parseable", () => {
+  const runtime = workspace();
+  const path = writeArtifact(artifactPath(runtime, 9, "claude-implement.json"), {
+    subtype: "success",
+    password: "hunter2hunter2",
+    result: "ran `curl -H 'Authorization: Bearer abcdef123456789'`"
+  });
+  const parsed = JSON.parse(readFileSync(path, "utf8"));
+  assert.equal(parsed.password, "[redacted]");
+  assert.doesNotMatch(parsed.result, /abcdef123456789/);
+  assert.equal(parsed.subtype, "success");
+});
+
 test("step logger writes whole lines and redacts secrets crossing chunk boundaries", () => {
   const dir = workspace();
   const path = join(dir, "implementing.log");

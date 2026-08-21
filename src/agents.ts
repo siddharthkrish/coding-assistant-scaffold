@@ -1,7 +1,7 @@
 import { mkdirSync, readFileSync } from "node:fs";
 import { dirname } from "node:path";
-import type { StepSession } from "./activity.ts";
-import { ClaudeStreamReader } from "./claude-stream.ts";
+import { errorTailBytes, type StepSession } from "./activity.ts";
+import { ClaudeStreamReader, type ClaudeProgress } from "./claude-stream.ts";
 import { runCommand } from "./process.ts";
 import { renderPrompt } from "./prompts.ts";
 import type { Config, Review, Run } from "./types.ts";
@@ -37,10 +37,16 @@ export async function invokeClaude(
   if (config.claude.model) args.push("--model", config.claude.model);
   if (resume && run.claudeSessionId) args.push("--resume", run.claudeSessionId);
   const reader = new ClaudeStreamReader(run.claudeSessionId);
-  const report = (lines: string[]) => {
-    for (const line of lines) {
-      if (session) session.progress(`claude ${line}`);
-      else console.log(`  claude ${line}`);
+  const report = (entries: ClaudeProgress[]) => {
+    for (const entry of entries) {
+      if (!session) {
+        console.log(`  claude ${entry.summary}`);
+        continue;
+      }
+      session.progress(`claude ${entry.summary}`);
+      // The summary is truncated for the console and activity row; keep the full
+      // message, tool input, and tool result output in the rotating log.
+      if (entry.detail !== entry.summary) session.detail(entry.detail);
     }
   };
   const consume = (stream: "stdout" | "stderr", chunk: string) => {
@@ -52,6 +58,8 @@ export async function invokeClaude(
     cwd: run.worktree,
     stdin: prompt,
     timeoutMs: timeout(config),
+    // Events are consumed as they stream, so only an error tail needs retaining.
+    captureBytes: errorTailBytes,
     ...(session?.commandHooks("claude", consume) ?? { onData: consume })
   });
   report(reader.end());
@@ -94,6 +102,8 @@ Acceptance context:
     cwd: run.worktree,
     stdin: prompt,
     timeoutMs: timeout(config),
+    // The review is read back from `--output-last-message`, not from stdout.
+    captureBytes: errorTailBytes,
     ...(session?.commandHooks("codex") ?? {})
   });
   const review = JSON.parse(readFileSync(outputPath, "utf8")) as Review;
