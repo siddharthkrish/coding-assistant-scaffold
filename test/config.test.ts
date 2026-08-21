@@ -15,6 +15,24 @@ test("config applies safe defaults and resolves repository paths", () => {
   assert.equal(config.codex.reasoningEffort, "high");
 });
 
+test("config defaults bounded logging and allows overrides", () => {
+  const dir = mkdtempSync(join(tmpdir(), "pair-orchestrator-"));
+  const path = join(dir, "orchestrator.config.json");
+  writeFileSync(path, JSON.stringify({ repository: "./repo", logging: { retainRuns: 5 } }));
+  const config = loadConfig(path);
+  assert.equal(config.logging.retainRuns, 5);
+  assert.equal(config.logging.maxFileBytes, 5_000_000);
+  assert.equal(config.logging.maxFilesPerStep, 3);
+  assert.equal(config.logging.heartbeatSeconds, 15);
+});
+
+test("config rejects a logging limit that would let logs grow unbounded", () => {
+  const dir = mkdtempSync(join(tmpdir(), "pair-orchestrator-"));
+  const path = join(dir, "orchestrator.config.json");
+  writeFileSync(path, JSON.stringify({ repository: "./repo", logging: { maxFileBytes: 0 } }));
+  assert.throws(() => loadConfig(path), /logging.maxFileBytes must be a positive integer/);
+});
+
 test("config rejects an invalid review limit", () => {
   const dir = mkdtempSync(join(tmpdir(), "pair-orchestrator-"));
   const path = join(dir, "orchestrator.config.json");

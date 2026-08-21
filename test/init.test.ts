@@ -29,7 +29,14 @@ test("init scaffolds repo-local config, ignore rules, and package scripts", asyn
   assert.equal(manifest.scripts.agents, "agent-orchestrator start");
   assert.equal(manifest.scripts["agents:once"], "agent-orchestrator run");
   assert.equal(manifest.scripts["agents:doctor"], "agent-orchestrator doctor");
-  assert.match(readFileSync(join(dir, ".gitignore"), "utf8"), /\.agent-orchestrator\/\*\.sqlite\*/);
+  assert.equal(manifest.scripts["agents:logs"], "agent-orchestrator logs");
+  assert.equal(config.logging.retainRuns, 20);
+
+  const ignored = readFileSync(join(dir, ".gitignore"), "utf8");
+  assert.match(ignored, /\.agent-orchestrator\/\*\.sqlite\*/);
+  // Streamed logs and agent artifacts must never be committed.
+  assert.match(ignored, /\.agent-orchestrator\/logs\//);
+  assert.match(ignored, /\.agent-orchestrator\/artifacts\//);
 });
 
 test("init can create an opt-in private tooling package", async () => {

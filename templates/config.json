@@ -16,5 +16,11 @@
   "codex": {
     "model": null,
     "reasoningEffort": "high"
+  },
+  "logging": {
+    "maxFileBytes": 5000000,
+    "maxFilesPerStep": 3,
+    "retainRuns": 20,
+    "heartbeatSeconds": 15
   }
 }

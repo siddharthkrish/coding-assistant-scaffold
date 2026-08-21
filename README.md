@@ -18,7 +18,8 @@ For Node projects, `init` installs an exact development dependency and adds thes
 npm run agents:once    # Process one issue
 npm run agents         # Continuously watch the issue queue
 npm run agents:doctor  # Validate tools and authentication
-npm run agents:status  # Inspect durable workflow state
+npm run agents:status  # Inspect durable workflow state and live progress
+npm run agents:logs    # Read the streamed Claude and Codex output
 ```
 
 Before the first run, validate the local tools and authentication:
@@ -66,14 +67,51 @@ agent-orchestrator doctor [--config path]
 agent-orchestrator run [--issue N] [--config path]
 agent-orchestrator start [--config path]
 agent-orchestrator resume [--issue N] [--config path]
-agent-orchestrator status [--config path]
+agent-orchestrator status [--json] [--config path]
+agent-orchestrator logs [--issue N] [--step name] [--lines N] [--follow] [--config path]
 agent-orchestrator eject-prompts [--force] [--config path]
 ```
 
 - `run` processes one queued or explicitly selected issue.
 - `start` keeps polling the labeled GitHub issue queue until interrupted.
 - `resume` continues persisted work after an operational failure.
+- `status` shows each run's current sub-step, liveness, process IDs, elapsed and idle time, and log path.
+- `logs` prints (and optionally follows) the recorded Claude, Codex, and test output for a run.
 - `eject-prompts` creates editable implementation, review, fix, and CI-fix prompts under `.agent-orchestrator/prompts/`.
+
+## Observability
+
+Claude Code runs in streaming mode, so each message and tool call is reported while it happens rather than only after the process exits. Every sub-step writes an append-only log:
+
+```text
+.agent-orchestrator/logs/issue-<n>/<step>.log        # streamed Claude, Codex, and test output
+.agent-orchestrator/artifacts/issue-<n>/*.json       # final Claude result and each Codex review
+```
+
+Logs, artifacts, and everything `status` prints are scrubbed of credential-shaped values, including prefixed environment variables such as `GITHUB_TOKEN` or `AWS_SECRET_ACCESS_KEY`, `Authorization` headers of any scheme, quoted JSON fields, and multiline private keys. Numeric values are left intact so structured artifacts stay parseable. Log files rotate so continuous `start` mode cannot grow storage without bound, and streamed output is not accumulated in memory — only a tail is kept for error messages. Tune this under `logging` in the config: `maxFileBytes`, `maxFilesPerStep`, `retainRuns`, and `heartbeatSeconds`.
+
+Console output and the `status` sub-step show a short summary, while the log keeps the full assistant message, tool input, and tool result output — including failures — so a stuck run can be diagnosed after the fact.
+
+These directories are created self-ignoring, so upgrading an existing installation never leaves untracked runtime files in the checkout, regardless of what its `.gitignore` contains.
+
+While a step runs, the orchestrator records a heartbeat with the child process ID. `status` uses that to distinguish live work from a run whose orchestrator has exited:
+
+| liveness | meaning |
+| --- | --- |
+| `running` | the orchestrator is alive and a Claude, Codex, or test process is executing |
+| `waiting` | the orchestrator owns the run but no child process is active |
+| `stale` | the orchestrator is alive but has not reported progress recently |
+| `orphaned` | the orchestrator process is gone; re-run `resume --issue N` |
+| `done` | the run reached a terminal state |
+
+Liveness is decided by the orchestrator process, not the child: a run whose orchestrator died is `orphaned` even if a Claude or Codex process is still running, since nothing can advance its state. The surviving child is still reported separately (`childAlive` in `status --json`) so it can be stopped before resuming.
+
+To watch a run that appears stuck:
+
+```sh
+agent-orchestrator status
+agent-orchestrator logs --issue 1 --follow
+```
 
 ## Requirements
 
@@ -94,6 +132,7 @@ The initializer detects the Git root, current or remote default branch, package 
 - `maxReviewCycles`
 - Claude allowed tools
 - Codex reasoning effort
+- `logging` retention and heartbeat interval
 
 All options can be overridden per repository. The default worktree location can be changed with `worktreeRoot`.
 

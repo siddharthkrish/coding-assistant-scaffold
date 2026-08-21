@@ -1,8 +1,10 @@
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, resolve } from "node:path";
+import { ActivityTracker, type StepSession } from "./activity.ts";
 import {
   ciFixPrompt, fixPrompt, implementationPrompt, invokeClaude, invokeCodexReview
 } from "./agents.ts";
+import { artifactPath, writeArtifact } from "./logging.ts";
 import {
   claimIssue, commitAndPush, completeIssue, fastForwardLocalMain, headSha,
   markPrReady, mergePr, nextIssue, openDraftPr, prChecks, prepareWorktree, prHeadSha, runTests
@@ -16,17 +18,20 @@ export class Orchestrator {
   readonly store: StateStore;
   readonly runtimeDir: string;
   readonly schemaPath: string;
+  readonly tracker: ActivityTracker;
 
   constructor(
     config: Config,
     store: StateStore,
     runtimeDir: string,
-    schemaPath: string
+    schemaPath: string,
+    tracker?: ActivityTracker
   ) {
     this.config = config;
     this.store = store;
     this.runtimeDir = runtimeDir;
     this.schemaPath = schemaPath;
+    this.tracker = tracker ?? new ActivityTracker(store, config, runtimeDir);
   }
 
   async run(explicitIssue?: number): Promise<Run | null> {
@@ -54,26 +59,51 @@ export class Orchestrator {
     while (!isTerminal(run)) {
       switch (run.status) {
         case "claimed": {
-          await claimIssue(this.config, {
-            number: run.issueNumber, title: run.issueTitle, body: run.issueBody, url: run.issueUrl
+          const current = run;
+          await this.tracker.track(run, "claiming", async (session) => {
+            await claimIssue(this.config, {
+              number: current.issueNumber, title: current.issueTitle,
+              body: current.issueBody, url: current.issueUrl
+            });
+            if (!existsSync(current.worktree)) {
+              session.progress(`preparing worktree ${current.worktree}`);
+              await prepareWorktree(this.config, current);
+            }
           });
-          if (!existsSync(run.worktree)) await prepareWorktree(this.config, run);
           run = this.store.update(run.id, "implementing", { lastError: null });
           break;
         }
         case "implementing": {
-          const sessionId = await invokeClaude(this.config, run, implementationPrompt(this.config, run));
-          await runTests(this.config, run);
-          await commitAndPush(this.config, run, `feat: resolve issue #${run.issueNumber}`);
-          const prNumber = run.prNumber ?? await openDraftPr(this.config, run);
-          run = this.store.update(run.id, "reviewing", { prNumber, claudeSessionId: sessionId, lastError: null });
+          const current = run;
+          const outcome = await this.tracker.track(current, "implementing", async (session) => {
+            const claude = await invokeClaude(
+              this.config, current, implementationPrompt(this.config, current), false, session
+            );
+            this.saveClaudeResult(current, "implement", claude.result, session);
+            await runTests(this.config, current, session);
+            await commitAndPush(this.config, current, `feat: resolve issue #${current.issueNumber}`);
+            const prNumber = current.prNumber ?? await openDraftPr(this.config, current);
+            return { prNumber, sessionId: claude.sessionId };
+          });
+          run = this.store.update(run.id, "reviewing", {
+            prNumber: outcome.prNumber, claudeSessionId: outcome.sessionId, lastError: null
+          });
           break;
         }
         case "reviewing":
         case "final_review": {
-          const finalReview = run.status === "final_review";
-          const reviewPath = this.reviewPath(run);
-          const review = await invokeCodexReview(this.config, run, this.schemaPath, reviewPath, finalReview);
+          const current = run;
+          const finalReview = current.status === "final_review";
+          const reviewPath = this.reviewPath(current);
+          const step = finalReview ? `final-review-${current.reviewCycle}` : "review";
+          const review = await this.tracker.track(current, step, async (session) => {
+            const result = await invokeCodexReview(
+              this.config, current, this.schemaPath, reviewPath, finalReview, session
+            );
+            writeArtifact(artifactPath(this.runtimeDir, current.issueNumber, `codex-${step}.json`), result);
+            session.progress(`codex verdict: ${result.verdict} (${result.findings.length} findings)`);
+            return result;
+          });
           const sha = await headSha(run);
           if (needsFix(review)) {
             if (run.reviewCycle >= this.config.maxReviewCycles) {
@@ -87,53 +117,78 @@ export class Orchestrator {
           break;
         }
         case "fixing": {
-          const review = this.readReview(run);
-          const sessionId = await invokeClaude(this.config, run, fixPrompt(this.config, run, review), true);
-          await runTests(this.config, run);
-          const nextCycle = run.reviewCycle + 1;
-          const previousSha = run.reviewedSha;
-          const fixedSha = await commitAndPush(this.config, run, `fix: address review for issue #${run.issueNumber} (cycle ${nextCycle})`);
-          if (previousSha === fixedSha) throw new Error("Claude did not change the commit after requested fixes");
+          const current = run;
+          const nextCycle = current.reviewCycle + 1;
+          const sessionId = await this.tracker.track(current, `fixing-${nextCycle}`, async (session) => {
+            const review = this.readReview(current);
+            const claude = await invokeClaude(
+              this.config, current, fixPrompt(this.config, current, review), true, session
+            );
+            this.saveClaudeResult(current, `fix-${nextCycle}`, claude.result, session);
+            await runTests(this.config, current, session);
+            const previousSha = current.reviewedSha;
+            const fixedSha = await commitAndPush(
+              this.config, current, `fix: address review for issue #${current.issueNumber} (cycle ${nextCycle})`
+            );
+            if (previousSha === fixedSha) throw new Error("Claude did not change the commit after requested fixes");
+            return claude.sessionId;
+          });
           run = this.store.update(run.id, "final_review", {
             reviewCycle: nextCycle, reviewedSha: null, claudeSessionId: sessionId, lastError: null
           });
           break;
         }
         case "waiting_ci": {
-          const currentSha = await headSha(run);
-          const remoteSha = await prHeadSha(run);
-          if (currentSha !== run.reviewedSha || remoteSha !== run.reviewedSha) {
-            run = this.store.update(run.id, "final_review", { reviewedSha: null }, "Head changed after review");
-            break;
-          }
-          const checks = await this.waitForChecks(run);
-          if (checks.state === "failed") {
-            if (run.reviewCycle >= this.config.maxReviewCycles) {
-              run = this.store.update(run.id, "human_review", {}, "CI failed and iteration limit was reached");
-              break;
+          const current = run;
+          const outcome = await this.tracker.track(current, "waiting-ci", async (session) => {
+            const currentSha = await headSha(current);
+            const remoteSha = await prHeadSha(current);
+            if (currentSha !== current.reviewedSha || remoteSha !== current.reviewedSha) {
+              return { kind: "head_changed" as const };
             }
-            const sessionId = await invokeClaude(this.config, run, ciFixPrompt(this.config, run, checks.summary), true);
-            await runTests(this.config, run);
-            const nextCycle = run.reviewCycle + 1;
-            const fixedSha = await commitAndPush(this.config, run, `fix: repair CI for issue #${run.issueNumber} (cycle ${nextCycle})`);
-            if (fixedSha === run.reviewedSha) throw new Error("Claude did not change the commit after CI failure");
+            const checks = await this.waitForChecks(current, session);
+            if (checks.state !== "failed") {
+              await markPrReady(current);
+              return { kind: "passed" as const, summary: checks.summary };
+            }
+            if (current.reviewCycle >= this.config.maxReviewCycles) return { kind: "exhausted" as const };
+            const claude = await invokeClaude(
+              this.config, current, ciFixPrompt(this.config, current, checks.summary), true, session
+            );
+            const nextCycle = current.reviewCycle + 1;
+            this.saveClaudeResult(current, `ci-fix-${nextCycle}`, claude.result, session);
+            await runTests(this.config, current, session);
+            const fixedSha = await commitAndPush(
+              this.config, current, `fix: repair CI for issue #${current.issueNumber} (cycle ${nextCycle})`
+            );
+            if (fixedSha === current.reviewedSha) throw new Error("Claude did not change the commit after CI failure");
+            return { kind: "ci_fixed" as const, nextCycle, sessionId: claude.sessionId };
+          });
+          if (outcome.kind === "head_changed") {
+            run = this.store.update(run.id, "final_review", { reviewedSha: null }, "Head changed after review");
+          } else if (outcome.kind === "exhausted") {
+            run = this.store.update(run.id, "human_review", {}, "CI failed and iteration limit was reached");
+          } else if (outcome.kind === "ci_fixed") {
             run = this.store.update(run.id, "final_review", {
-              reviewCycle: nextCycle, reviewedSha: null, claudeSessionId: sessionId
+              reviewCycle: outcome.nextCycle, reviewedSha: null, claudeSessionId: outcome.sessionId
             });
-            break;
+          } else {
+            run = this.store.update(run.id, "merging", {}, outcome.summary);
           }
-          await markPrReady(run);
-          run = this.store.update(run.id, "merging", {}, checks.summary);
           break;
         }
         case "merging": {
-          await mergePr(this.config, run);
+          const current = run;
+          await this.tracker.track(current, "merging", () => mergePr(this.config, current));
           run = this.store.update(run.id, "syncing_main");
           break;
         }
         case "syncing_main": {
-          await fastForwardLocalMain(this.config);
-          await completeIssue(this.config, run.issueNumber);
+          const current = run;
+          await this.tracker.track(current, "syncing-main", async () => {
+            await fastForwardLocalMain(this.config);
+            await completeIssue(this.config, current.issueNumber);
+          });
           run = this.store.update(run.id, "completed", { lastError: null });
           break;
         }
@@ -148,17 +203,33 @@ export class Orchestrator {
     return resolve(this.runtimeDir, "reviews", `${basename(run.id)}.json`);
   }
 
+  /** Keeps the final structured Claude result inspectable after the process exits. */
+  private saveClaudeResult(
+    run: Run,
+    label: string,
+    result: Record<string, unknown> | null,
+    session: StepSession
+  ): void {
+    if (!result) {
+      session.progress("claude produced no structured result event");
+      return;
+    }
+    const path = writeArtifact(artifactPath(this.runtimeDir, run.issueNumber, `claude-${label}.json`), result);
+    session.progress(`claude result saved to ${path}`);
+  }
+
   private readReview(run: Run): Review {
     const path = this.reviewPath(run);
     if (!existsSync(path)) throw new Error(`Missing persisted review artifact: ${path}`);
     return JSON.parse(readFileSync(path, "utf8")) as Review;
   }
 
-  private async waitForChecks(run: Run): Promise<Awaited<ReturnType<typeof prChecks>>> {
+  private async waitForChecks(run: Run, session?: StepSession): Promise<Awaited<ReturnType<typeof prChecks>>> {
     const deadline = Date.now() + this.config.commandTimeoutMinutes * 60_000;
     while (true) {
       const result = await prChecks(run);
       writeFileSync(resolve(this.runtimeDir, "last-checks.txt"), result.summary);
+      session?.progress(`checks ${result.state}`);
       if (result.state !== "pending") return result;
       if (Date.now() >= deadline) throw new Error("Timed out waiting for CI checks");
       await new Promise((resolvePromise) => setTimeout(resolvePromise, this.config.pollIntervalSeconds * 1000));
