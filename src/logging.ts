@@ -1,6 +1,6 @@
 import {
-  appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync,
-  rmSync, statSync, writeFileSync
+  appendFileSync, closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync,
+  readSync, renameSync, rmSync, statSync, writeFileSync
 } from "node:fs";
 import { resolve } from "node:path";
 import type { LoggingConfig } from "./types.ts";
@@ -33,25 +33,44 @@ const secretPatterns: Array<[RegExp, string]> = [
 ];
 
 const credentialKeys =
-  "authorization|api[-_]?keys?|access[-_]?tokens?|auth[-_]?tokens?|tokens?|secrets?|passwords?|passwd|credentials?";
+  "authorization|api[-_]?keys?|access[-_]?tokens?|auth[-_]?tokens?|tokens?|secrets?|passwords?|passwd|passphrase|credentials?";
+
+/** Authorization schemes whose scheme name must be kept while the value is dropped. */
+const authSchemes = "Bearer|Basic|Digest|Token|ApiKey|JWT|OAuth";
 
 /**
  * Matches `key = value`, `key: value`, and the quoted `"key": "value"` form used by
  * JSON. The closing quote is left outside the match so replacing only the value
  * keeps structured records parseable.
+ *
+ * A credential term is recognised anywhere inside an identifier rather than only at
+ * a `\b` boundary: `_` is a word character, so `\b` never matches inside names like
+ * `GITHUB_TOKEN` or `AWS_SECRET_ACCESS_KEY`. The leading separator is captured so it
+ * can be preserved in the replacement.
  */
 const assignmentPattern = new RegExp(
-  `(\\b(?:${credentialKeys})\\b["']?\\s*(?:[:=]|=>)\\s*["']?)(?:Bearer\\s+)?([^\\s"',;}\\])]{6,})`,
-  "gi"
+  `((?:^|[^A-Za-z0-9])[A-Za-z0-9_-]{0,64}?(?:${credentialKeys})[A-Za-z0-9_-]{0,64}` +
+  `["']?\\s*(?:[:=]|=>)\\s*["']?(?:(?:${authSchemes})\\s+)?)([^\\s"',;}\\])]{6,})`,
+  "gim"
 );
 
-// The value group stops before `]`, so an already-redacted value arrives here as
-// `[redacted` rather than `[redacted]`; matching on the prefix keeps redact()
-// idempotent instead of appending a bracket on every pass.
-const placeholders = /^(?:null|true|false|undefined|none|\[redacted.*)$/i;
+/**
+ * Values that must be left alone. Booleans, null, and numbers are unquoted in JSON,
+ * so replacing them with a bare `[redacted]` would produce unparseable output — and
+ * a six-digit token *count* is not a secret. An already-redacted value arrives here
+ * as `[redacted` because the value group stops before `]`; matching on that prefix
+ * keeps redact() idempotent instead of appending a bracket on every pass.
+ */
+const placeholders = /^(?:null|true|false|undefined|none|-?\d+(?:\.\d+)?|\[redacted.*)$/i;
 
 export const privateKeyStart = /-----BEGIN (?:[A-Z ]+ )?PRIVATE KEY-----/;
 export const privateKeyEnd = /-----END (?:[A-Z ]+ )?PRIVATE KEY-----/;
+
+/** A base64 body line: no spaces and long, which ordinary log lines are not. */
+const privateKeyBody = /^[A-Za-z0-9+/=]{16,}$/;
+
+/** Upper bound on suppressed lines; a 4096-bit key body is well under this. */
+const maxPrivateKeyLines = 128;
 
 /**
  * Strips credential-shaped substrings so persisted output never carries secrets.
@@ -80,6 +99,7 @@ export class StepLogger {
   #bytes = 0;
   #closed = false;
   #inPrivateKey = false;
+  #privateKeyLines = 0;
 
   constructor(path: string, limits: Pick<LoggingConfig, "maxFileBytes" | "maxFilesPerStep">) {
     this.path = path;
@@ -127,14 +147,28 @@ export class StepLogger {
    * Redacts and appends one line. A PEM block spans many lines, so the single-line
    * redaction pass can never see it whole; the block is suppressed with a state
    * machine instead and replaced by one placeholder.
+   *
+   * Suppression always terminates. Truncated output can carry a header with no
+   * footer, and staying in suppression mode for the rest of the step would silently
+   * swallow all later progress — the log would look stuck while the agent worked on.
+   * It therefore ends at the footer, at the first line that is not key material, or
+   * at a line budget, whichever comes first, and never emits the body itself.
    */
   #emit(line: string): void {
     if (this.#inPrivateKey) {
-      if (privateKeyEnd.test(line)) this.#inPrivateKey = false;
-      return;
+      if (privateKeyEnd.test(line)) {
+        this.#inPrivateKey = false;
+        return;
+      }
+      this.#privateKeyLines += 1;
+      if (privateKeyBody.test(line) && this.#privateKeyLines <= maxPrivateKeyLines) return;
+      this.#inPrivateKey = false;
+      this.#append("[unterminated private key block; resuming output]");
+      // Fall through so this line, which is not key material, is still recorded.
     }
     if (privateKeyStart.test(line) && !privateKeyEnd.test(line)) {
       this.#inPrivateKey = true;
+      this.#privateKeyLines = 0;
       this.#append("[redacted private key]");
       return;
     }
@@ -214,6 +248,82 @@ export function tailFile(path: string, lines: number): string | null {
   const all = content.split("\n");
   if (all.at(-1) === "") all.pop();
   return all.slice(-lines).join("\n");
+}
+
+type FileIdentity = { dev: number; ino: number; size: number };
+
+function identify(path: string): FileIdentity | null {
+  try {
+    const stats = statSync(path);
+    return { dev: stats.dev, ino: stats.ino, size: stats.size };
+  } catch {
+    return null;
+  }
+}
+
+function sameFile(left: FileIdentity, right: FileIdentity): boolean {
+  return left.dev === right.dev && left.ino === right.ino;
+}
+
+/** Reads a byte range without loading the whole file. */
+function readRange(path: string, start: number, end: number): string {
+  if (end <= start) return "";
+  const buffer = Buffer.alloc(end - start);
+  const handle = openSync(path, "r");
+  try {
+    const read = readSync(handle, buffer, 0, buffer.length, start);
+    return buffer.subarray(0, read).toString("utf8");
+  } finally {
+    closeSync(handle);
+  }
+}
+
+/**
+ * Incremental reader for a rotating log.
+ *
+ * Rotation is detected by file identity rather than by size. Comparing sizes alone
+ * misses a rotation whose replacement file has already grown past the previous
+ * offset, which would silently skip the beginning of the new file.
+ */
+export class LogFollower {
+  readonly path: string;
+  #identity: FileIdentity | null;
+  #offset: number;
+
+  constructor(path: string, options: { fromStart?: boolean } = {}) {
+    this.path = path;
+    this.#identity = identify(path);
+    this.#offset = options.fromStart || !this.#identity ? 0 : this.#identity.size;
+  }
+
+  /** Returns everything appended since the last call, across rotations. */
+  poll(): string {
+    const current = identify(this.path);
+    if (!current) return "";
+    let output = "";
+    if (this.#identity && !sameFile(current, this.#identity)) {
+      output += this.#drainRotated();
+      this.#offset = 0;
+    }
+    this.#identity = current;
+    // A file truncated in place rather than renamed also restarts from zero.
+    if (current.size < this.#offset) this.#offset = 0;
+    if (current.size > this.#offset) {
+      output += readRange(this.path, this.#offset, current.size);
+      this.#offset = current.size;
+    }
+    return output;
+  }
+
+  /** Recovers the tail written to the previous file before it was rotated away. */
+  #drainRotated(): string {
+    const previous = this.#identity;
+    if (!previous) return "";
+    const rotated = `${this.path}.1`;
+    const identity = identify(rotated);
+    if (!identity || !sameFile(identity, previous)) return "";
+    return readRange(rotated, this.#offset, identity.size);
+  }
 }
 
 /** Lists the readable log files for an issue, newest activity first. */

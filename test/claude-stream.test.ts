@@ -66,6 +66,43 @@ test("stream reader tolerates unknown event shapes", () => {
   assert.deepEqual(reader.push(`${JSON.stringify({ type: "assistant", message: {} })}\n`), []);
 });
 
+test("an oversized record is dropped with a diagnostic instead of growing unbounded", () => {
+  const reader = new ClaudeStreamReader(null, 4096);
+  // A tool result encodes command output inside one JSON line, so a huge record can
+  // arrive as many chunks with no newline at all.
+  let entries: Array<{ summary: string }> = [];
+  entries = entries.concat(reader.push(`{"type":"user","message":{"content":[{"type":"tool_result","content":"`));
+  for (let index = 0; index < 200; index += 1) {
+    entries = entries.concat(reader.push("A".repeat(1000)));
+  }
+  assert.deepEqual(entries, [], "no entry is emitted until the record ends");
+  const closing = reader.push(`"}]}}\n`);
+  assert.equal(closing.length, 1);
+  assert.match(closing[0].summary, /dropped oversized event/);
+  assert.match(closing[0].summary, /limit 4096/);
+});
+
+test("the reader keeps working after dropping an oversized record", () => {
+  const reader = new ClaudeStreamReader(null, 1024);
+  reader.push(`{"type":"user","content":"${"B".repeat(5000)}`);
+  const resumed = reader.push(`"}\n${JSON.stringify({
+    type: "system", subtype: "init", session_id: "sess-after"
+  })}\n`);
+  assert.equal(resumed.length, 2);
+  assert.match(resumed[0].summary, /dropped oversized event/);
+  assert.equal(resumed[1].summary, "session sess-after");
+  assert.equal(reader.sessionId, "sess-after", "later events must still be parsed");
+});
+
+test("an oversized record still open at end of stream is reported once", () => {
+  const reader = new ClaudeStreamReader(null, 1024);
+  reader.push(`{"type":"user","content":"${"C".repeat(4000)}`);
+  const ended = reader.end();
+  assert.equal(ended.length, 1);
+  assert.match(ended[0].summary, /dropped oversized event/);
+  assert.deepEqual(reader.end(), [], "the diagnostic is not repeated");
+});
+
 test("detail keeps the full assistant message the summary truncates", () => {
   const reader = new ClaudeStreamReader();
   const long = "x".repeat(500);

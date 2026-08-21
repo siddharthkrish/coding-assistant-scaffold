@@ -4,8 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import {
-  StepLogger, artifactPath, listLogFiles, pruneRunHistory, redact, runLogDirectory,
-  stepLogPath, tailFile, writeArtifact
+  LogFollower, StepLogger, artifactPath, listLogFiles, pruneRunHistory, redact,
+  runLogDirectory, stepLogPath, tailFile, writeArtifact
 } from "../src/logging.ts";
 
 const limits = { maxFileBytes: 5_000_000, maxFilesPerStep: 3 };
@@ -95,6 +95,99 @@ test("artifacts redact generic credential fields and stay parseable", () => {
   assert.equal(parsed.subtype, "success");
 });
 
+const environmentSecrets = [
+  ["GITHUB_TOKEN", "plain-secret-value"],
+  ["AWS_SECRET_ACCESS_KEY", "wJalrXUtnFEMIK7MDENGbPxRfiCYEXAMPLEKEY"],
+  ["DATABASE_PASSWORD", "hunter2hunter2"],
+  ["OPENAI_API_KEY", "abcdef123456789xyz"],
+  ["MY_APP_AUTH_TOKEN", "topsecretvalue"],
+  ["service_credentials", "correcthorsebattery"]
+] as const;
+
+test("redaction covers credential terms inside prefixed environment variables", () => {
+  for (const [name, value] of environmentSecrets) {
+    const output = redact(`export ${name}=${value}`);
+    assert.doesNotMatch(output, new RegExp(value), `${name} was not redacted`);
+    assert.match(output, new RegExp(`${name}=\\[redacted\\]`), `${name} should stay identifiable`);
+  }
+});
+
+test("redaction covers authorization schemes beyond Bearer", () => {
+  for (const scheme of ["Basic", "Bearer", "Digest", "Token", "ApiKey", "OAuth"]) {
+    const output = redact(`Authorization: ${scheme} dXNlcjpwYXNzd29yZA==`);
+    assert.doesNotMatch(output, /dXNlcjpwYXNzd29yZA/, `${scheme} value leaked`);
+    // The scheme itself is diagnostic, not secret, so it is preserved.
+    assert.match(output, new RegExp(`Authorization: ${scheme} \\[redacted\\]`));
+  }
+});
+
+test("redaction leaves numeric fields alone so structured records stay valid", () => {
+  // A six-digit token *count* is not a secret, and an unquoted JSON value replaced
+  // by a bare placeholder would make the artifact unparseable.
+  const output = redact(JSON.stringify({ output_tokens: 123456, input_tokens: 999999, ok: true }));
+  const parsed = JSON.parse(output);
+  assert.equal(parsed.output_tokens, 123456);
+  assert.equal(parsed.input_tokens, 999999);
+  assert.equal(parsed.ok, true);
+});
+
+test("environment-style secrets are scrubbed through the logger and artifacts", () => {
+  const dir = workspace();
+  const path = join(dir, "implementing.log");
+  const logger = new StepLogger(path, limits);
+  for (const [name, value] of environmentSecrets) logger.write(`env ${name}=${value}\n`);
+  logger.close();
+  const logged = readFileSync(path, "utf8");
+
+  const artifact = writeArtifact(
+    artifactPath(dir, 4, "claude-implement.json"),
+    Object.fromEntries(environmentSecrets)
+  );
+  const artifactText = readFileSync(artifact, "utf8");
+  JSON.parse(artifactText);
+
+  for (const [name, value] of environmentSecrets) {
+    assert.doesNotMatch(logged, new RegExp(value), `${name} leaked into the log`);
+    assert.doesNotMatch(artifactText, new RegExp(value), `${name} leaked into the artifact`);
+  }
+});
+
+test("an unterminated private key block does not swallow later progress", () => {
+  const dir = workspace();
+  const path = join(dir, "implementing.log");
+  const logger = new StepLogger(path, limits);
+  // Truncated tool output: a header and body with no footer.
+  logger.write([
+    "-----BEGIN RSA PRIVATE KEY-----",
+    "MIIEowIBAAKCAQEAsecretkeymaterialline1",
+    "MIIEowIBAAKCAQEAsecretkeymaterialline2",
+    "claude tool Bash(npm test)",
+    "result: success, 4 turns",
+    ""
+  ].join("\n"));
+  logger.close();
+  const content = readFileSync(path, "utf8");
+  assert.doesNotMatch(content, /secretkeymaterial/, "key material must never be written");
+  assert.match(content, /\[redacted private key\]/);
+  assert.match(content, /unterminated private key block/);
+  // The agent kept working; the log must keep showing it.
+  assert.match(content, /claude tool Bash\(npm test\)/);
+  assert.match(content, /result: success, 4 turns/);
+});
+
+test("suppression recovers at a line budget when key material never ends", () => {
+  const dir = workspace();
+  const path = join(dir, "implementing.log");
+  const logger = new StepLogger(path, limits);
+  logger.write("-----BEGIN PRIVATE KEY-----\n");
+  for (let index = 0; index < 400; index += 1) logger.write(`${"A".repeat(64)}\n`);
+  logger.write("progress after the flood\n");
+  logger.close();
+  const content = readFileSync(path, "utf8");
+  assert.match(content, /progress after the flood/);
+  assert.match(content, /unterminated private key block/);
+});
+
 test("step logger writes whole lines and redacts secrets crossing chunk boundaries", () => {
   const dir = workspace();
   const path = join(dir, "implementing.log");
@@ -160,6 +253,75 @@ test("artifacts are persisted redacted and are readable", () => {
   const parsed = JSON.parse(readFileSync(path, "utf8"));
   assert.equal(parsed.subtype, "success");
   assert.doesNotMatch(parsed.result, /ghp_/);
+});
+
+test("following starts at the end and reports only new output", () => {
+  const dir = workspace();
+  const path = join(dir, "implementing.log");
+  const logger = new StepLogger(path, limits);
+  logger.write("before following\n");
+  logger.flush();
+
+  const follower = new LogFollower(path);
+  assert.equal(follower.poll(), "", "nothing new yet");
+  logger.write("after following\n");
+  logger.flush();
+  const appended = follower.poll();
+  assert.match(appended, /after following/);
+  assert.doesNotMatch(appended, /before following/);
+});
+
+test("following survives rotation even when the new file passes the old offset", () => {
+  const dir = workspace();
+  const path = join(dir, "review.log");
+  // A small cap so a burst of output rotates the file between polls.
+  const logger = new StepLogger(path, { maxFileBytes: 2048, maxFilesPerStep: 3 });
+  for (let index = 0; index < 20; index += 1) logger.write(`line ${index} ${"x".repeat(60)}\n`);
+  logger.flush();
+
+  const follower = new LogFollower(path);
+  assert.equal(follower.poll(), "");
+
+  // Write far more than the cap before the next poll, so the replacement file has
+  // already grown past the previous offset by the time following resumes.
+  const written: string[] = [];
+  for (let index = 20; index < 200; index += 1) {
+    const line = `line ${index} ${"x".repeat(60)}`;
+    written.push(line);
+    logger.write(`${line}\n`);
+  }
+  logger.flush();
+
+  const appended = follower.poll();
+  // Rotation dropped the oldest file, but nothing between the follow point and the
+  // current head may be skipped.
+  const seen = new Set(appended.split("\n"));
+  const retained = written.filter((line) => existsSync(path) && seen.has(line));
+  assert.ok(retained.length > 0, "expected followed output");
+  assert.match(appended, new RegExp(`line 199 `), "the newest line must be followed");
+  // The head of the replacement file must not be skipped.
+  const currentFile = readFileSync(path, "utf8").split("\n").filter(Boolean);
+  for (const line of currentFile) {
+    assert.ok(seen.has(line), `following skipped a line of the new file: ${line}`);
+  }
+});
+
+test("following restarts cleanly when a log is truncated in place", () => {
+  const dir = workspace();
+  const path = join(dir, "tests.log");
+  writeFileSync(path, "old content that is quite long\n");
+  const follower = new LogFollower(path);
+  writeFileSync(path, "fresh\n");
+  assert.match(follower.poll(), /fresh/);
+});
+
+test("following a file that does not exist yet reports nothing until it appears", () => {
+  const dir = workspace();
+  const path = join(dir, "later.log");
+  const follower = new LogFollower(path);
+  assert.equal(follower.poll(), "");
+  writeFileSync(path, "first line\n");
+  assert.match(follower.poll(), /first line/);
 });
 
 test("log listing and tailing surface recorded output", () => {

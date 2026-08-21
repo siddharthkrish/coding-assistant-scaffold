@@ -88,7 +88,7 @@ Claude Code runs in streaming mode, so each message and tool call is reported wh
 .agent-orchestrator/artifacts/issue-<n>/*.json       # final Claude result and each Codex review
 ```
 
-Logs, artifacts, and everything `status` prints are scrubbed of credential-shaped values, including quoted JSON fields and multiline private keys. Log files rotate so continuous `start` mode cannot grow storage without bound, and streamed output is not accumulated in memory — only a tail is kept for error messages. Tune this under `logging` in the config: `maxFileBytes`, `maxFilesPerStep`, `retainRuns`, and `heartbeatSeconds`.
+Logs, artifacts, and everything `status` prints are scrubbed of credential-shaped values, including prefixed environment variables such as `GITHUB_TOKEN` or `AWS_SECRET_ACCESS_KEY`, `Authorization` headers of any scheme, quoted JSON fields, and multiline private keys. Numeric values are left intact so structured artifacts stay parseable. Log files rotate so continuous `start` mode cannot grow storage without bound, and streamed output is not accumulated in memory — only a tail is kept for error messages. Tune this under `logging` in the config: `maxFileBytes`, `maxFilesPerStep`, `retainRuns`, and `heartbeatSeconds`.
 
 Console output and the `status` sub-step show a short summary, while the log keeps the full assistant message, tool input, and tool result output — including failures — so a stuck run can be diagnosed after the fact.
 

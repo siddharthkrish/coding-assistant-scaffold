@@ -1,10 +1,10 @@
 #!/usr/bin/env node
-import { createReadStream, existsSync, readFileSync, statSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { basename, resolve } from "node:path";
 import { loadConfig, projectPath, runtimeDirectory } from "./config.ts";
 import { doctor } from "./doctor.ts";
 import { ejectPrompts, initializeProject } from "./init.ts";
-import { listLogFiles, tailFile } from "./logging.ts";
+import { LogFollower, listLogFiles, tailFile } from "./logging.ts";
 import { Orchestrator } from "./orchestrator.ts";
 import type { StateStore } from "./state-store.ts";
 import { formatDuration, statusRows } from "./status.ts";
@@ -173,25 +173,16 @@ async function printLogs(store: StateStore, config: Config): Promise<void> {
   await followFile(target);
 }
 
-/** Streams appended lines until interrupted. */
+/** Streams appended lines until interrupted, following the log across rotations. */
 async function followFile(path: string): Promise<void> {
-  let offset = statSync(path).size;
+  const follower = new LogFollower(path);
   await new Promise<void>((resolvePromise) => {
     const stop = () => { clearInterval(timer); resolvePromise(); };
     process.once("SIGINT", stop);
     process.once("SIGTERM", stop);
     const timer = setInterval(() => {
-      let size: number;
-      try {
-        size = statSync(path).size;
-      } catch {
-        return;
-      }
-      if (size < offset) offset = 0;
-      if (size === offset) return;
-      const stream = createReadStream(path, { start: offset, end: size - 1, encoding: "utf8" });
-      offset = size;
-      stream.on("data", (chunk) => process.stdout.write(chunk));
+      const appended = follower.poll();
+      if (appended) process.stdout.write(appended);
     }, 500);
   });
 }

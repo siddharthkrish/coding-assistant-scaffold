@@ -13,36 +13,72 @@
  */
 export type ClaudeProgress = { summary: string; detail: string };
 
+/**
+ * Cap on a single NDJSON record. A tool result encodes an entire command output or
+ * file inside one line, so without a bound a single event could grow until the
+ * orchestrator runs out of memory.
+ */
+export const maxRecordBytes = 4_000_000;
+
 export class ClaudeStreamReader {
   sessionId: string | null = null;
   result: Record<string, unknown> | null = null;
+  readonly maxRecordBytes: number;
   #pending = "";
+  #discarding = false;
+  #discarded = 0;
 
-  constructor(initialSessionId: string | null = null) {
+  constructor(initialSessionId: string | null = null, recordLimit = maxRecordBytes) {
     this.sessionId = initialSessionId;
+    this.maxRecordBytes = Math.max(1024, recordLimit);
   }
 
   /** Consumes a chunk and returns progress entries for each complete event. */
   push(chunk: string): ClaudeProgress[] {
-    this.#pending += chunk;
     const entries: ClaudeProgress[] = [];
-    let index = this.#pending.indexOf("\n");
-    while (index >= 0) {
-      const line = this.#pending.slice(0, index);
-      this.#pending = this.#pending.slice(index + 1);
-      const entry = this.#consume(line);
-      if (entry) entries.push(entry);
-      index = this.#pending.indexOf("\n");
+    let data = chunk;
+    while (data.length > 0) {
+      const index = data.indexOf("\n");
+      const segment = index < 0 ? data : data.slice(0, index);
+      data = index < 0 ? "" : data.slice(index + 1);
+
+      if (this.#discarding) {
+        // Drop the remainder of an oversized record; a newline ends it.
+        this.#discarded += segment.length;
+        if (index >= 0) entries.push(this.#endDiscard());
+        continue;
+      }
+
+      this.#pending += segment;
+      if (index >= 0) {
+        const entry = this.#consume(this.#pending);
+        this.#pending = "";
+        if (entry) entries.push(entry);
+      } else if (this.#pending.length > this.maxRecordBytes) {
+        // The record is still incomplete and already too large to retain.
+        this.#discarded = this.#pending.length;
+        this.#pending = "";
+        this.#discarding = true;
+      }
     }
     return entries;
   }
 
   /** Flushes any trailing partial line at end of stream. */
   end(): ClaudeProgress[] {
+    if (this.#discarding) return [this.#endDiscard()];
     const remainder = this.#pending;
     this.#pending = "";
     const entry = remainder ? this.#consume(remainder) : null;
     return entry ? [entry] : [];
+  }
+
+  #endDiscard(): ClaudeProgress {
+    const bytes = this.#discarded;
+    this.#discarding = false;
+    this.#discarded = 0;
+    const summary = `dropped oversized event (${bytes} characters, limit ${this.maxRecordBytes})`;
+    return { summary, detail: summary };
   }
 
   #consume(line: string): ClaudeProgress | null {
