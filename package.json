@@ -32,7 +32,11 @@
     "postbuild": "node -e \"require('node:fs').chmodSync('dist/cli.js', 0o755)\"",
     "check": "npm test && npm run build",
     "prepack": "npm run build",
-    "pack:check": "npm pack --dry-run --json"
+    "pack:check": "npm pack --dry-run --json",
+    "agents": "agent-orchestrator start",
+    "agents:once": "agent-orchestrator run",
+    "agents:doctor": "agent-orchestrator doctor",
+    "agents:status": "agent-orchestrator status"
   },
   "devDependencies": {
     "@types/node": "24.13.3",

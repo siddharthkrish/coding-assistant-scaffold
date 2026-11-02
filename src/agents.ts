@@ -58,12 +58,14 @@ export async function invokeCodexReview(
   const prompt = renderPrompt(config, "review", {
     reviewPhase: phase,
     issueNumber: String(run.issueNumber),
+    prNumber: String(run.prNumber),
+    branch: run.branch,
     issueTitle: run.issueTitle,
     issueBody: run.issueBody,
     baseBranch: config.baseBranch
-  }, `Perform an {{reviewPhase}} code review for issue #{{issueNumber}}: {{issueTitle}}.
+  }, `Perform an {{reviewPhase}} code review of pull request #{{prNumber}} for issue #{{issueNumber}}: {{issueTitle}}.
 
-Review the complete diff between {{baseBranch}} and HEAD. Inspect relevant surrounding code and tests. Run read-only checks if helpful. Focus on concrete correctness, security, regressions, data loss, concurrency, and missing test coverage. Do not edit files. Return only the schema-conforming review. Approve only when there are no actionable findings.
+The current worktree is checked out on that PR's branch ({{branch}}) and HEAD is its head commit. Review only this worktree, never any other checkout. Review the complete diff between {{baseBranch}} and HEAD. Inspect relevant surrounding code and tests. Run read-only checks if helpful. Focus on concrete correctness, security, regressions, data loss, concurrency, and missing test coverage. Do not edit files. Return only the schema-conforming review. Approve only when there are no actionable findings.
 
 Acceptance context:
 {{issueBody}}`);
@@ -93,20 +95,24 @@ function validateReview(review: Review): void {
 
 export function implementationPrompt(config: Config, run: Run): string {
   return renderPrompt(config, "implement", {
-    issueNumber: String(run.issueNumber), issueTitle: run.issueTitle,
+    issueNumber: String(run.issueNumber), prNumber: String(run.prNumber), branch: run.branch, issueTitle: run.issueTitle,
     issueBody: run.issueBody, testCommand: promptTestCommand(config)
   }, `Implement GitHub issue #{{issueNumber}}: {{issueTitle}}
 
+You are working on pull request #{{prNumber}} (branch {{branch}}) for issue #{{issueNumber}}. The current directory is the isolated git worktree checked out on that PR's branch; every change you make lands on that PR, and the orchestrator commits and pushes it. Never read or modify any other checkout of this repository.
+
 {{issueBody}}
 
-Work only in the current repository. Inspect the codebase before editing. Implement the complete acceptance criteria, add or update tests, and run {{testCommand}}. Do not commit, push, open a pull request, merge, or modify issue labels; the orchestrator owns Git and GitHub state. Finish with a concise summary and the checks you ran.`);
+Work only in the current worktree. Inspect the codebase before editing. Implement the complete acceptance criteria, add or update tests, and run {{testCommand}}. Do not commit, push, open a pull request, merge, or modify issue labels; the orchestrator owns Git and GitHub state. Finish with a concise summary and the checks you ran.`);
 }
 
 export function fixPrompt(config: Config, run: Run, review: Review): string {
   return renderPrompt(config, "fix", {
-    issueNumber: String(run.issueNumber), review: JSON.stringify(review, null, 2),
+    issueNumber: String(run.issueNumber), prNumber: String(run.prNumber), branch: run.branch, review: JSON.stringify(review, null, 2),
     testCommand: promptTestCommand(config)
   }, `Address every actionable Codex review finding below for issue #{{issueNumber}}.
+
+You are working on pull request #{{prNumber}} (branch {{branch}}) for issue #{{issueNumber}}. The current directory is the isolated git worktree checked out on that PR's branch; every change you make lands on that PR, and the orchestrator commits and pushes it. Never read or modify any other checkout of this repository.
 
 {{review}}
 
@@ -115,8 +121,12 @@ Inspect the current files rather than trusting line numbers blindly. Make the sm
 
 export function ciFixPrompt(config: Config, run: Run, checks: string): string {
   return renderPrompt(config, "ci-fix", {
-    issueNumber: String(run.issueNumber), checks, testCommand: promptTestCommand(config)
-  }, `The CI checks for issue #{{issueNumber}} failed. Diagnose and fix the failures using this check summary:
+    issueNumber: String(run.issueNumber), prNumber: String(run.prNumber), branch: run.branch, checks, testCommand: promptTestCommand(config)
+  }, `The CI checks for pull request #{{prNumber}} (issue #{{issueNumber}}) failed.
+
+You are working on pull request #{{prNumber}} (branch {{branch}}) for issue #{{issueNumber}}. The current directory is the isolated git worktree checked out on that PR's branch; every change you make lands on that PR, and the orchestrator commits and pushes it. Never read or modify any other checkout of this repository.
+
+Diagnose and fix the failures using this check summary:
 
 {{checks}}
 

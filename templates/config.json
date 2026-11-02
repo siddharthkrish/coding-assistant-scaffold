@@ -6,7 +6,7 @@
   "completedLabel": "agent-completed",
   "branchPrefix": "agents/issue-",
   "testCommand": "auto",
-  "maxReviewCycles": 3,
+  "maxReviewCycles": 1,
   "pollIntervalSeconds": 30,
   "commandTimeoutMinutes": 45,
   "claude": {
