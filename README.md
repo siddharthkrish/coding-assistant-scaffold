@@ -9,7 +9,7 @@ Merge authority remains in deterministic code rather than either agent.
 Run the initializer inside the repository the agents should work on:
 
 ```sh
-npx pair-programming-orchestrator@0.1.3 init
+npx pair-programming-orchestrator@0.2.0 init
 ```
 
 For Node projects, `init` installs an exact development dependency and adds these scripts:
@@ -36,7 +36,7 @@ npm run agents:once -- --issue 123
 
 During initialization, the orchestrator creates any missing `agent-ready`, `agent-in-progress`, and `agent-completed` labels in the GitHub repository while preserving existing labels. Use `--no-labels` only when intentionally scaffolding without GitHub access.
 
-Repositories without `package.json` remain technology-neutral and use the version-pinned `npx pair-programming-orchestrator@0.1.3 <command>` form. Their generated `testCommand` is `auto`: after Claude implements the issue, the orchestrator deterministically detects npm, pnpm, Yarn, Bun, Python, Rust, or Go tests from the issue worktree. If no supported test command exists, the run stops with instructions to configure one explicitly.
+Repositories without `package.json` remain technology-neutral and use the version-pinned `npx pair-programming-orchestrator@0.2.0 <command>` form. Their generated `testCommand` is `auto`: after Claude implements the issue, the orchestrator deterministically detects npm, pnpm, Yarn, Bun, Python, Rust, or Go tests from the issue worktree. If no supported test command exists, the run stops with instructions to configure one explicitly.
 
 Use `--create-package-json` to opt into a minimal private tooling package, an exact orchestrator development dependency, and the same `agents:*` scripts shown above. Use `--no-install` to scaffold without adding a package dependency. Avoid `npm exec -- agent-orchestrator`: without the local development dependency, npm resolves that as the unrelated `agent-orchestrator` package from the registry.
 
