@@ -33,10 +33,10 @@
     "check": "npm test && npm run build",
     "prepack": "npm run build",
     "pack:check": "npm pack --dry-run --json",
-    "agents": "agent-orchestrator start",
-    "agents:once": "agent-orchestrator run",
-    "agents:doctor": "agent-orchestrator doctor",
-    "agents:status": "agent-orchestrator status"
+    "agents": "node src/cli.ts start",
+    "agents:once": "node src/cli.ts run",
+    "agents:doctor": "node src/cli.ts doctor",
+    "agents:status": "node src/cli.ts status"
   },
   "devDependencies": {
     "@types/node": "24.13.3",
