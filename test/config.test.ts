@@ -11,7 +11,7 @@ test("config applies safe defaults and resolves repository paths", () => {
   writeFileSync(path, JSON.stringify({ repository: "./repo" }));
   const config = loadConfig(path);
   assert.equal(config.repository, join(dir, "repo"));
-  assert.equal(config.maxReviewCycles, 3);
+  assert.equal(config.maxReviewCycles, 1);
   assert.equal(config.codex.reasoningEffort, "high");
 });
 

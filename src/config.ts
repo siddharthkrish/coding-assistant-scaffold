@@ -14,7 +14,7 @@ const defaults = {
   branchPrefix: "agents/issue-",
   stateDatabase: ".agent-orchestrator/state.sqlite",
   testCommand: "npm test",
-  maxReviewCycles: 3,
+  maxReviewCycles: 1,
   pollIntervalSeconds: 30,
   commandTimeoutMinutes: 45,
   claude: { model: null, allowedTools: "Read,Write,Edit,Bash" },

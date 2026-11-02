@@ -55,8 +55,9 @@ export async function commitAndPush(config: Config, run: Run, message: string): 
     await runCommand("git", ["add", "-A"], { cwd: run.worktree });
     await runCommand("git", ["commit", "-m", message], { cwd: run.worktree });
   } else {
-    const ahead = await runCommand("git", ["rev-list", "--count", `${config.remote}/${config.baseBranch}..HEAD`], { cwd: run.worktree, ...quiet });
-    if (Number(ahead.stdout.trim()) < 1) throw new Error("Agent finished without making any changes");
+    // The PR is opened with an empty start commit, so commits ahead of base prove nothing; compare trees.
+    const diff = await runCommand("git", ["diff", "--quiet", `${config.remote}/${config.baseBranch}`, "HEAD"], { cwd: run.worktree, allowNonZero: true, ...quiet });
+    if (diff.code === 0) throw new Error("Agent finished without making any changes");
   }
   await runCommand("git", ["push", "-u", config.remote, run.branch], { cwd: run.worktree });
   return headSha(run);
@@ -67,6 +68,12 @@ export async function openDraftPr(config: Config, run: Run): Promise<number> {
     cwd: run.worktree, quiet: true, allowNonZero: true
   });
   if (existing.code === 0 && existing.stdout.trim()) return Number(existing.stdout.trim());
+  // A PR needs at least one commit; an empty start commit lets it exist before the agents write code.
+  const ahead = await runCommand("git", ["rev-list", "--count", `${config.remote}/${config.baseBranch}..HEAD`], { cwd: run.worktree, ...quiet });
+  if (Number(ahead.stdout.trim()) < 1) {
+    await runCommand("git", ["commit", "--allow-empty", "-m", `chore: start work on issue #${run.issueNumber}`], { cwd: run.worktree });
+  }
+  await runCommand("git", ["push", "-u", config.remote, run.branch], { cwd: run.worktree });
   await runCommand("gh", [
     "pr", "create", "--draft", "--base", config.baseBranch, "--head", run.branch,
     "--title", run.issueTitle,
@@ -74,6 +81,12 @@ export async function openDraftPr(config: Config, run: Run): Promise<number> {
   ], { cwd: run.worktree });
   const result = await runCommand("gh", ["pr", "view", run.branch, "--json", "number", "--jq", ".number"], { cwd: run.worktree, ...quiet });
   return Number(result.stdout.trim());
+}
+
+export async function commentOnPr(run: Run, body: string): Promise<void> {
+  await runCommand("gh", ["pr", "comment", String(run.prNumber), "--body-file", "-"], {
+    cwd: run.worktree, stdin: body
+  });
 }
 
 export async function markPrReady(run: Run): Promise<void> {

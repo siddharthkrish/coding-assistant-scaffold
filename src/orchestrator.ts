@@ -4,10 +4,11 @@ import {
   ciFixPrompt, fixPrompt, implementationPrompt, invokeClaude, invokeCodexReview
 } from "./agents.ts";
 import {
-  claimIssue, commitAndPush, completeIssue, fastForwardLocalMain, headSha,
+  claimIssue, commentOnPr, commitAndPush, completeIssue, fastForwardLocalMain, headSha,
   markPrReady, mergePr, nextIssue, openDraftPr, prChecks, prepareWorktree, prHeadSha, runTests
 } from "./git-github.ts";
 import { needsFix } from "./policy.ts";
+import { formatReviewComment } from "./review-comment.ts";
 import type { StateStore } from "./state-store.ts";
 import type { Config, Review, Run } from "./types.ts";
 
@@ -62,11 +63,14 @@ export class Orchestrator {
           break;
         }
         case "implementing": {
+          if (run.prNumber === null) {
+            const prNumber = await openDraftPr(this.config, run);
+            run = this.store.update(run.id, "implementing", { prNumber }, `Opened draft PR #${prNumber}`);
+          }
           const sessionId = await invokeClaude(this.config, run, implementationPrompt(this.config, run));
           await runTests(this.config, run);
           await commitAndPush(this.config, run, `feat: resolve issue #${run.issueNumber}`);
-          const prNumber = run.prNumber ?? await openDraftPr(this.config, run);
-          run = this.store.update(run.id, "reviewing", { prNumber, claudeSessionId: sessionId, lastError: null });
+          run = this.store.update(run.id, "reviewing", { claudeSessionId: sessionId, lastError: null });
           break;
         }
         case "reviewing":
@@ -75,6 +79,12 @@ export class Orchestrator {
           const reviewPath = this.reviewPath(run);
           const review = await invokeCodexReview(this.config, run, this.schemaPath, reviewPath, finalReview);
           const sha = await headSha(run);
+          try {
+            await commentOnPr(run, formatReviewComment(review, sha, finalReview));
+          } catch (error) {
+            // The review is already saved locally; a failed comment must not discard it.
+            console.warn(`Could not post review comment to PR #${run.prNumber}: ${error instanceof Error ? error.message : String(error)}`);
+          }
           if (needsFix(review)) {
             if (run.reviewCycle >= this.config.maxReviewCycles) {
               run = this.store.update(run.id, "human_review", { reviewedSha: sha }, "Review iteration limit reached");

@@ -5,3 +5,6 @@ dist/
 *.swp
 *.tgz
 .DS_Store
+.agent-orchestrator/*.sqlite*
+.agent-orchestrator/reviews/
+.agent-orchestrator/last-checks.txt

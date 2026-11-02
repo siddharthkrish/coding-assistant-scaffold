@@ -91,7 +91,7 @@ The initializer detects the Git root, current or remote default branch, package 
 
 - `testCommand`
 - issue queue labels
-- `maxReviewCycles`
+- `maxReviewCycles` (default `1`: implement, review, one fix round, then merge; raise it deliberately to allow more rounds)
 - Claude allowed tools
 - Codex reasoning effort
 
@@ -101,10 +101,10 @@ All options can be overridden per repository. The default worktree location can 
 
 1. Claim one issue by moving it from `readyLabel` to `claimedLabel`.
 2. Create a branch and external Git worktree from `remote/baseBranch`.
-3. Run Claude Code in edit mode; the orchestrator owns commits and GitHub operations.
-4. Run project tests, commit, push, and open a draft PR.
-5. Run Codex in a read-only sandbox with a packaged JSON response schema.
-6. If Codex requests changes, resume the Claude session and repeat, up to `maxReviewCycles`.
+3. Push the branch with an empty start commit and open a draft PR, so the PR exists before any code is written.
+4. Run Claude Code in edit mode inside the worktree on the PR's branch; its prompt names the PR. The orchestrator runs tests, commits, and pushes to that PR and owns all GitHub operations.
+5. Run Codex in a read-only sandbox with a packaged JSON response schema. The prompt names the draft PR, and the orchestrator posts each review (verdict, reviewed commit SHA, findings) to that PR as a comment. A failed comment is logged but does not discard the review.
+6. If Codex requests changes, resume the Claude session and repeat, up to `maxReviewCycles` fix rounds (default 1). Review-fix and CI-fix rounds share this budget; once it is spent, any further requested change or CI failure stops the run in `human_review` instead of looping.
 7. Wait for CI. A failed check goes back to Claude and must pass another fresh Codex review.
 8. Verify both local and remote PR heads exactly equal the SHA approved by Codex.
 9. Mark the PR ready, merge with GitHub's rebase strategy, and update local main using `git merge --ff-only`.
